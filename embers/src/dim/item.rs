@@ -1,6 +1,5 @@
 pub mod inv;
 
-use super::actor::living::player::Player;
 use super::actor::living::{Damage, DamageKnockback, DamageSource};
 use super::actor::primed_tnt::primed_tnt;
 use super::{Action, ActionSlots, CollisionLayer, EntityInteraction, exclude_source};
@@ -27,7 +26,6 @@ use std::iter::once;
 use std::marker::PhantomData;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
-use thiserror::Error;
 use toml::{Table, Value};
 use uuid::Uuid;
 
@@ -38,6 +36,7 @@ pub mod embers {
                 std::sync::LazyLock::new(|| $crate::utils::NamespacedKey::new_embers($key));
         };
     }
+    item!(EMBER_SHARD, "ember_shard");
     item!(SPEAR, "spear");
     item!(SWORD, "sword");
     item!(TNT, "tnt");
@@ -376,7 +375,78 @@ pub type BoxedItemActionBuilder = Boxed<DynItemActionBuilder, dyn ItemActionBuil
 pub struct ItemActionEnvironment<'w, 's> {
     commands: Commands<'w, 's>,
     spatial_query: SpatialQuery<'w, 's>,
-    player: Single<'w, 's, (Entity, &'static GlobalTransform), With<Player>>,
+    holders: Query<'w, 's, &'static ChildOf>,
+    transforms: Query<'w, 's, &'static GlobalTransform>,
+}
+
+/// Resolves the attacking entity (`Entity`) and its [`GlobalTransform`] by walking from the
+/// wielded item (which is `ChildOf` its holder) up to its holder.
+///
+/// This replaces the previous hard-coded `Single<With<Player>>` so that mobs holding a weapon
+/// can reuse the exact same melee/throw actions as the player.
+fn attacker<'s>(
+    holders: &'s Query<'s, 's, &'static ChildOf>,
+    transforms: &'s Query<'s, 's, &'static GlobalTransform>,
+    item: Entity,
+) -> Option<(Entity, &'s GlobalTransform)> {
+    let holder = holders.get(item).ok()?.0;
+    let transform = transforms.get(holder).ok()?;
+    Some((holder, transform))
+}
+
+/// Static configuration of a melee strike: a precomputed fan-shaped (`section`)
+/// collider together with the damage dealt on hit.
+///
+/// Shared by the player melee item actions and mob (zombie) attacks.
+#[derive(Clone, Debug)]
+pub struct MeleeStrike {
+    collider: Collider,
+    pub damage: f32,
+    pub knockback: f32,
+}
+
+impl MeleeStrike {
+    pub fn new(damage: f32, knockback: f32, arc_deg: f32, range: f32) -> Option<Self> {
+        Some(Self {
+            collider: section(arc_deg.to_radians(), range, 1.)?,
+            damage,
+            knockback,
+        })
+    }
+
+    /// Deals damage to every living actor inside the strike fan centered on
+    /// `attacker`, excluding `attacker` itself.
+    ///
+    /// The `section` collider is built around the local +X axis, while Tnua
+    /// characters face along their local -Z axis, so the fan is rotated +90°
+    /// around Y to swing along the attacker's facing direction.
+    pub fn apply(
+        &self,
+        commands: &mut Commands,
+        spatial_query: &mut SpatialQuery,
+        attacker: Entity,
+        transform: &GlobalTransform,
+    ) {
+        let rotation = transform.rotation() * Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        for entity in spatial_query.shape_intersections(
+            &self.collider,
+            transform.translation(),
+            rotation,
+            &SpatialQueryFilter::from_mask(CollisionLayer::LivingActor)
+                .with_excluded_entities(once(attacker)),
+        ) {
+            commands.write_message(Damage {
+                target: entity,
+                amount: self.damage,
+                knockback: DamageKnockback::Radial(self.knockback),
+                source: DamageSource {
+                    origin: transform.translation(),
+                    causing_entity: Some(attacker),
+                    direct_entity: Some(attacker),
+                },
+            });
+        }
+    }
 }
 
 pub type ItemActionSlots = ActionSlots<ItemAction>;
@@ -469,17 +539,19 @@ pub(super) fn plugin(app: &mut App) {
                     next_action: Option<String>,
                 }
                 let action = Melee::deserialize(config)?;
-                #[derive(Debug, Error)]
-                #[error("Couldn't create a collider for the given arc_deg({arc_deg}) and range({range}).")]
-                struct NoCollider {
-                    arc_deg: f32,
-                    range: f32,
-                }
-                let collider = section(action.arc_deg.to_radians(), action.range, 1.).ok_or(NoCollider {
-                    arc_deg: action.arc_deg,
-                    range: action.range,
+                let strike = MeleeStrike::new(
+                    action.damage,
+                    action.knockback,
+                    action.arc_deg,
+                    action.range,
+                )
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Couldn't create a collider for the given arc_deg({}) and range({}).",
+                        action.arc_deg,
+                        action.range
+                    )
                 })?;
-                let spatial_query_filter = SpatialQueryFilter::from_mask(CollisionLayer::LivingActor);
                 let next_action = action.next_action.as_ref().and_then(|next| {
                     NamespacedKey::try_from_with_namespaced(next.as_str(), &key)
                         .ok()
@@ -487,30 +559,25 @@ pub(super) fn plugin(app: &mut App) {
                 Ok(ItemAction::new(
                     key,
                     |_environment, _item| {},
-                    move |ItemActionEnvironment {
-                            commands,
-                            spatial_query,
-                            player,
-                        }, _item, duration| {
-                            let (player, transform) = **player;
-                            if duration.is_none() {
-                                for entity in spatial_query.shape_intersections(&collider, transform.translation(), transform.rotation(), &spatial_query_filter.clone().with_excluded_entities(once(player))) {
-                                    commands.write_message(Damage {
-                                        target: entity,
-                                        amount: action.damage,
-                                        knockback: DamageKnockback::Radial(action.knockback),
-                                        source: DamageSource {
-                                            origin: transform.translation(),
-                                            causing_entity: Some(player),
-                                            direct_entity: Some(player),
-                                        },
-                                    });
-                                }
-                                next_action.clone()
-                            } else {
-                                None
-                            }
-                        },
+                    move |environment, item, duration| {
+                        let Some((player, transform)) =
+                            attacker(&environment.holders, &environment.transforms, item)
+                        else {
+                            warn!("Could not resolve attacker for melee action; skipping damage");
+                            return None;
+                        };
+                        if duration.is_none() {
+                            strike.apply(
+                                &mut environment.commands,
+                                &mut environment.spatial_query,
+                                player,
+                                transform,
+                            );
+                            next_action.clone()
+                        } else {
+                            None
+                        }
+                    },
                     ItemActionWield::Hands(action.wield),
                     Duration::from_secs_f32(action.duration_secs),
                 ))
@@ -534,9 +601,13 @@ pub(super) fn plugin(app: &mut App) {
                 move |ItemActionEnvironment {
                         commands,
                         spatial_query: _,
-                        player,
-                    }, _item| {
-                        let (player, transform) = **player;
+                        holders,
+                        transforms,
+                    }, item| {
+                        let Some((player, transform)) = attacker(&holders, &transforms, item) else {
+                            warn!("Could not resolve attacker for throw action; skipping");
+                            return;
+                        };
                         commands.spawn_scene(bsn! {
                             primed_tnt()
                             exclude_source(player)
@@ -564,11 +635,7 @@ pub(super) fn plugin(app: &mut App) {
                 Ok(ItemAction::new(
                     key,
                     |_environment, _item| {},
-                    move |ItemActionEnvironment {
-                            commands,
-                            spatial_query: _,
-                            player,
-                        }, _item, duration| {
+                    move |_environment, _item, duration| {
                             if duration.is_none() {
                                 hold_action.clone()
                             } else {

@@ -1,5 +1,7 @@
 use super::ActiveOverlay;
 use super::dim::DimensionViewNode;
+use crate::dim::actor::living::Health;
+use crate::dim::actor::living::attributes::{Attributes, MaxHealth};
 use crate::dim::actor::living::player::{
     Player, PlayerInventory, SelectedHotbarSlot, process_input_hotbar_in_hud,
 };
@@ -18,6 +20,9 @@ struct HotbarSelectionIndicatorNode;
 
 #[derive(Clone, Component, Default)]
 struct MainHandSlotNode;
+
+#[derive(Clone, Component, Default)]
+struct HealthBarFillNode;
 
 fn init(
     mut commands: Commands,
@@ -108,12 +113,44 @@ fn init(
                     ),
                 ]
             ),
+            (
+                #HealthBar
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: percent(50),
+                    margin: UiRect::left(percent(-26)),
+                    top: px(4),
+                    width: percent(52),
+                    height: px(5),
+                }
+                BackgroundColor(Color::srgba(0.1, 0.1, 0.1, 0.7))
+                Children [
+                    (
+                        #HealthBarFillNode
+                        HealthBarFillNode
+                        Node {
+                            width: percent(100),
+                            height: percent(100),
+                        }
+                        BackgroundColor(Color::srgb(0.75, 0.1, 0.1))
+                    ),
+                ]
+            ),
         ]
     });
 }
 
 fn fina(mut cursor_options: Single<&mut CursorOptions, With<PrimaryWindow>>) {
     cursor_options.grab_mode = CursorGrabMode::None;
+}
+
+fn update_health_bar(
+    player: Single<(&Health, &Attributes<MaxHealth>), With<Player>>,
+    mut fill: Single<&mut Node, With<HealthBarFillNode>>,
+) {
+    let (health, max_health) = *player;
+    let ratio = (health.0 / max_health.value()).clamp(0., 1.);
+    fill.width = percent(ratio * 100.);
 }
 
 fn update_hotbar_selection_indicator(
@@ -165,5 +202,8 @@ pub(super) fn plugin(app: &mut App) {
     app.add_systems(OnEnter(ActiveOverlay::HeadsUpDisplay), init)
         .add_systems(OnExit(ActiveOverlay::HeadsUpDisplay), fina)
         .add_systems(Update, update_hotbar.after(process_input_hotbar_in_hud))
-        .add_systems(Update, update_hotbar_selection_indicator);
+        .add_systems(
+            Update,
+            (update_hotbar_selection_indicator, update_health_bar),
+        );
 }

@@ -8,11 +8,15 @@ use crate::pld::manager::{
     PayloadManager, inject_keyed_embers_payload_batch, resolve_handle, resolve_payload,
 };
 use crate::pld::{Payload, PayloadApp, Tag};
-use crate::ui::{ActiveOverlay, RootNode};
-use crate::utils::{Keyed, NamespacedKey};
+use crate::ui::RootNode;
+use crate::ui::loading_screen::{DimensionEntryContext, Load};
+use crate::utils::{Keyed, NamespacedKey, SystemRng};
+use actor::Actor;
 use actor::item_actor::item_actor_of;
+use actor::living::creeper::creeper;
 use actor::living::dummy::dummy;
-use actor::living::player::{Player, PlayerInventory, player};
+use actor::living::player::{Player, PlayerInventory, SpawnPoint, player_scene};
+use actor::living::zombie::{ZombieWeapon, zombie};
 use actor::living::{Damage, DamageKnockback, DamageSource, LivingActor, player};
 use avian3d::math::Quaternion;
 use avian3d::prelude::*;
@@ -31,8 +35,11 @@ use bevy_tnua::builtins::{TnuaBuiltinCrouch, TnuaBuiltinDash, TnuaBuiltinKnockba
 use bevy_tnua::prelude::*;
 use derive_where::derive_where;
 use embers_macros::identify;
+use item::embers::{EMBER_SHARD, SPEAR, SWORD};
 use item::inv::{ItemDestination, ItemMoveQuantity, ItemSource, MoveItemCommandExt};
 use item::item_stack;
+use rand::RngExt;
+use rand::rngs::SmallRng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ops::Neg;
@@ -48,6 +55,7 @@ pub mod embers {
     }
     dim!(ASSEMBLY_APEX, "assembly_apex");
     dim!(LOBBY, "lobby");
+    dim!(OPERATION, "operation");
 }
 
 #[derive(Default, Resource)]
@@ -88,65 +96,262 @@ impl DimensionGenerationRequest {
 #[derive(Clone, Component, Copy, Default)]
 struct Ground;
 
-fn handle_dimension_generation_request(
-    request: On<DimensionGenerationRequest>,
-    mut commands: Commands,
-    mut loaded: ResMut<LoadedDimensions>,
-    root_node: Single<Entity, With<RootNode>>,
-) {
-    let DimensionGenerationRequest(key) = &*request;
-    loaded.0.insert(key.clone(), commands.spawn_scene(bsn! {
+fn dimension_spawn_point(dimension: &NamespacedKey) -> Vec3 {
+    if *dimension == *embers::LOBBY {
+        Vec3::new(0., 1., 0.)
+    } else if *dimension == *embers::OPERATION {
+        Vec3::new(0., 1., 18.)
+    } else {
+        Vec3::new(0., 1., 0.)
+    }
+}
+
+fn dimension_lighting() -> impl Scene {
+    bsn! {
+        #Sol
+        DirectionalLight
+        template_value(Transform::from_translation(Vec3::ONE).looking_at(Vec3::ZERO, Vec3::Y))
+    }
+}
+
+fn dimension_ground(size: f32) -> impl Scene {
+    bsn! {
+        Mesh3d(asset_value(Plane3d::default().mesh().size(size, size)))
+        MeshMaterial3d<StandardMaterial>(asset_value(Color::WHITE))
+        { PhysicsPreset::Environment.physics(false) }
+        Ground
+        template_value(Collider::heightfield(vec![vec![0.0, 0.0], vec![0.0, 0.0]], Vec3::splat(size)))
+    }
+}
+
+fn lobby_scene() -> impl Scene {
+    bsn! {
         #Dimension
-        ChildOf({*root_node})
-        Dimension({key.clone()})
+        Dimension({embers::LOBBY.clone()})
         ActiveDimension
         Transform
         Visibility
         Children [
             (
-                #Sol
-                DirectionalLight
-                template_value(Transform::from_translation(Vec3::ONE).looking_at(Vec3::ZERO, Vec3::Y))
+                dimension_lighting()
             ),
             (
-                Mesh3d(asset_value(Plane3d::default().mesh().size(20., 20.)))
-                MeshMaterial3d<StandardMaterial>(asset_value(Color::WHITE))
-                { PhysicsPreset::Environment.physics(false) }
-                Ground
-                template_value(Collider::heightfield(vec![vec![0.0, 0.0], vec![0.0, 0.0]], Vec3::splat(20.)))
+                dimension_ground(20.)
             ),
-            gateway(),
             (
-                #Player
-                Mesh3d(
-                    asset_value(
-                        Cylinder {
-                            radius: 0.5,
-                            half_height: 0.85,
-                        }
-                        .mesh(),
-                    ),
-                )
-                MeshMaterial3d<StandardMaterial>(asset_value(Color::srgb(0.3, 0.5, 0.3)))
-                player()
-                Transform::from_xyz(0.0, 1.0, 0.0)
-                LinearVelocity::from(Vec3::new(0., 10., 0.))
+                gateway(&INTERACTION_GATEWAY_TO_OPERATION)
+                Transform::from_xyz(0.0, 0.5, -5.0)
             ),
             (
                 #Dummy
                 dummy()
                 Transform::from_xyz(5.0, 0.5, 0.0)
             ),
+        ]
+    }
+}
+
+/// Number of creepers spawned per operation dimension generation.
+const CREEPER_SPAWN_COUNT: usize = 3;
+/// Number of zombies spawned per operation dimension generation.
+const ZOMBIE_SPAWN_COUNT: usize = 5;
+/// Number of scattered ember shard item actors per operation generation.
+const SCATTERED_SHARD_COUNT: usize = 8;
+/// Number of scattered weapon item actors per operation generation.
+const SCATTERED_WEAPON_COUNT: usize = 2;
+/// Spawn positions stay at least this far from the dimension entry point.
+const ENTRY_CLEAR_RADIUS: f32 = 6.;
+/// Mobs and items spawn within `±OPERATION_SPAWN_BOUND` of the origin.
+const OPERATION_SPAWN_BOUND: f32 = 16.;
+/// Seconds after entering the operation until the extraction portal appears.
+const OPERATION_PORTAL_DELAY_SECS: f32 = 90.;
+/// Where the extraction portal appears once its timer is up.
+const OPERATION_PORTAL_SPAWN: Vec3 = Vec3::new(0., 0.5, 0.);
+/// (center, size) of the fixed cuboid obstacles in the operation arena.
+const OPERATION_OBSTACLES: [(Vec3, Vec3); 7] = [
+    (Vec3::new(-9., 0.75, -6.), Vec3::new(2.5, 1.5, 2.5)),
+    (Vec3::new(9., 0.75, -6.), Vec3::new(2.5, 1.5, 2.5)),
+    (Vec3::new(-9., 0.75, 6.), Vec3::new(2.5, 1.5, 2.5)),
+    (Vec3::new(9., 0.75, 6.), Vec3::new(2.5, 1.5, 2.5)),
+    (Vec3::new(0., 0.75, -12.), Vec3::new(4., 2., 2.)),
+    (Vec3::new(-5., 0.75, 12.), Vec3::new(2., 1.5, 2.)),
+    (Vec3::new(5., 0.75, 12.), Vec3::new(2., 1.5, 2.)),
+];
+
+fn obstacle(center: Vec3, size: Vec3) -> impl Scene {
+    bsn! {
+        Mesh3d(asset_value(Cuboid::new(size.x, size.y, size.z).mesh().build()))
+        MeshMaterial3d<StandardMaterial>(asset_value(Color::srgb(0.45, 0.4, 0.35)))
+        { PhysicsPreset::Environment.physics(false) }
+        Collider::cuboid(0.5 * size.x, 0.5 * size.y, 0.5 * size.z)
+        template_value(Transform::from_translation(center))
+    }
+}
+
+fn operation_scene() -> impl Scene {
+    bsn! {
+        #Dimension
+        Dimension({embers::OPERATION.clone()})
+        ActiveDimension
+        Transform
+        Visibility
+        PortalTimer({Timer::from_seconds(OPERATION_PORTAL_DELAY_SECS, TimerMode::Once)})
+        Children [
             (
-                item_actor_of(item_stack(item::embers::SWORD.clone()))
-                Transform::from_xyz(2.0, 1.0, 0.0)
+                dimension_lighting()
             ),
             (
-                item_actor_of(item_stack(item::embers::TNT.clone()))
-                Transform::from_xyz(2.0, 1.0, 0.0)
+                dimension_ground(40.)
+            ),
+            (
+                obstacle(OPERATION_OBSTACLES[0].0, OPERATION_OBSTACLES[0].1)
+            ),
+            (
+                obstacle(OPERATION_OBSTACLES[1].0, OPERATION_OBSTACLES[1].1)
+            ),
+            (
+                obstacle(OPERATION_OBSTACLES[2].0, OPERATION_OBSTACLES[2].1)
+            ),
+            (
+                obstacle(OPERATION_OBSTACLES[3].0, OPERATION_OBSTACLES[3].1)
+            ),
+            (
+                obstacle(OPERATION_OBSTACLES[4].0, OPERATION_OBSTACLES[4].1)
+            ),
+            (
+                obstacle(OPERATION_OBSTACLES[5].0, OPERATION_OBSTACLES[5].1)
+            ),
+            (
+                obstacle(OPERATION_OBSTACLES[6].0, OPERATION_OBSTACLES[6].1)
             ),
         ]
-    }).id());
+    }
+}
+
+/// Countdown on the operation dimension root; when it is up, the extraction
+/// portal (a gateway back to the lobby) spawns and stays.
+#[derive(Component, Clone, Default, Debug)]
+pub struct PortalTimer(Timer);
+
+fn tick_portal_timers(
+    mut commands: Commands,
+    mut operations: Query<(Entity, &mut PortalTimer), (With<Dimension>, With<ActiveDimension>)>,
+    time: Res<Time>,
+) {
+    for (entity, mut portal_timer) in operations.iter_mut() {
+        portal_timer.0.tick(time.delta());
+        if portal_timer.0.just_finished() {
+            let mut portal = commands.spawn_scene(bsn! {
+                gateway(&INTERACTION_GATEWAY_TO_LOBBY)
+                template_value(Transform::from_translation(OPERATION_PORTAL_SPAWN))
+            });
+            portal.insert(ChildOf(entity));
+        }
+    }
+}
+
+/// Random spawn position inside the operation arena, kept clear of the entry.
+fn random_operation_position(rng: &mut SystemRng<SmallRng>) -> Vec3 {
+    const ENTRY: Vec3 = Vec3::new(0., 1., 18.);
+    for _ in 0..16 {
+        let position = Vec3::new(
+            rng.random_range(-OPERATION_SPAWN_BOUND..=OPERATION_SPAWN_BOUND),
+            1.,
+            rng.random_range(-OPERATION_SPAWN_BOUND..=OPERATION_SPAWN_BOUND),
+        );
+        if position.distance(ENTRY) > ENTRY_CLEAR_RADIUS {
+            return position;
+        }
+    }
+    Vec3::new(0., 1., -OPERATION_SPAWN_BOUND)
+}
+
+/// Spawns the operation's mobs and scattered item loot. Called when the
+/// operation dimension is generated.
+fn spawn_operation_content(commands: &mut Commands, rng: &mut SystemRng<SmallRng>) {
+    for _ in 0..CREEPER_SPAWN_COUNT {
+        commands.spawn_scene(bsn! {
+            creeper()
+            template_value(Transform::from_translation(random_operation_position(rng)))
+        });
+    }
+    for _ in 0..ZOMBIE_SPAWN_COUNT {
+        commands.spawn_scene(bsn! {
+            zombie(ZombieWeapon::roll(rng))
+            template_value(Transform::from_translation(random_operation_position(rng)))
+        });
+    }
+    let scattered_items: Vec<NamespacedKey> = (0..SCATTERED_SHARD_COUNT)
+        .map(|_| EMBER_SHARD.clone())
+        .chain(
+            (0..SCATTERED_WEAPON_COUNT).map(|_| match rng.random_range(0..2) {
+                0 => SWORD.clone(),
+                _ => SPEAR.clone(),
+            }),
+        )
+        .collect();
+    for item_key in scattered_items {
+        commands.spawn_scene(bsn! {
+            item_actor_of(item_stack(item_key))
+            template_value(Transform::from_translation(random_operation_position(rng)))
+        });
+    }
+}
+
+fn unknown_dimension_scene(dimension: &NamespacedKey) -> impl Scene {
+    warn!("No scene is registered for dimension {dimension}; spawning a minimal one");
+    bsn! {
+        #Dimension
+        Dimension({dimension.clone()})
+        ActiveDimension
+        Transform
+        Visibility
+        Children [
+            (
+                dimension_lighting()
+            ),
+            (
+                dimension_ground(20.)
+            ),
+        ]
+    }
+}
+
+fn handle_dimension_generation_request(
+    request: On<DimensionGenerationRequest>,
+    mut commands: Commands,
+    mut loaded: ResMut<LoadedDimensions>,
+    players: Query<Entity, With<Player>>,
+    root_node: Single<Entity, With<RootNode>>,
+    mut rng: ResMut<SystemRng<SmallRng>>,
+) {
+    let DimensionGenerationRequest(key) = &*request;
+    for (evicted, entity) in loaded.0.drain() {
+        info!("Evicting dimension {evicted}");
+        commands.entity(entity).despawn();
+    }
+    let new_dimension = if *key == *embers::LOBBY {
+        commands.spawn_scene(lobby_scene()).id()
+    } else if *key == *embers::OPERATION {
+        commands.spawn_scene(operation_scene()).id()
+    } else {
+        commands.spawn_scene(unknown_dimension_scene(key)).id()
+    };
+    loaded.0.insert(key.clone(), new_dimension);
+    if *key == *embers::OPERATION {
+        spawn_operation_content(&mut commands, &mut rng);
+    }
+    let spawn_point = dimension_spawn_point(key);
+    if let Some(player) = players.iter().next() {
+        commands.entity(player).insert((
+            Transform::from_translation(spawn_point),
+            SpawnPoint(spawn_point),
+            LinearVelocity::from(Vec3::ZERO),
+        ));
+    } else {
+        let mut player_entity = commands.spawn_scene(player_scene(spawn_point));
+        player_entity.insert(ChildOf(*root_node));
+    }
 }
 
 #[derive(Deserialize, Serialize, Copy, Clone, Debug, Eq, Hash, PartialEq)]
@@ -812,22 +1017,29 @@ impl Default for WorldTime {
 #[derive(Clone, Component, Default)]
 struct Gateway;
 
-pub static INTERACTION_GATEWAY_TRAVEL: LazyLock<NamespacedKey> =
-    LazyLock::new(|| NamespacedKey::new_embers("gateway_travel"));
+pub static INTERACTION_GATEWAY_TO_LOBBY: LazyLock<NamespacedKey> =
+    LazyLock::new(|| NamespacedKey::new_embers("gateway_to_lobby"));
 
-pub fn gateway() -> impl Scene {
+pub static INTERACTION_GATEWAY_TO_OPERATION: LazyLock<NamespacedKey> =
+    LazyLock::new(|| NamespacedKey::new_embers("gateway_to_operation"));
+
+pub fn gateway(interaction: &NamespacedKey) -> impl Scene {
     bsn! {
         #Gateway
         Gateway
+        Actor
         Mesh3d(asset_value(Cuboid::new(3., 1., 3.).mesh().build()))
         MeshMaterial3d<StandardMaterial>(asset_value(StandardMaterial {
             base_color: Color::BLACK,
+            unlit: true,
             ..default()
         }))
         { PhysicsPreset::Phantom.physics(true) }
+        template_value(RigidBody::Static)
+        Collider::cuboid(1.5, 0.5, 1.5)
         Interactable {
             distance_factor: 1.,
-            initial_click: { Some(INTERACTION_GATEWAY_TRAVEL.clone()) },
+            initial_click: { Some(interaction.clone()) },
             initial_double_click: None,
         }
     }
@@ -861,17 +1073,23 @@ pub(super) fn plugin(app: &mut App) {
                         Duration::from_millis(200),
                     ),
                     EntityInteraction::new(
-                        NamespacedKey::new_embers("gateway_travel"),
-                        |EntityInteractionEnvironment {
-                             commands,
-                             player: _player,
-                         },
-                         _entity| {
-                            commands.queue(|world: &mut World| {
-                                world
-                                    .resource_mut::<NextState<ActiveOverlay>>()
-                                    .set(ActiveOverlay::GatewayMenu);
-                            });
+                        INTERACTION_GATEWAY_TO_LOBBY.clone(),
+                        |environment, _entity| {
+                            environment.commands.trigger(Load::EnterDimension(
+                                DimensionEntryContext::GatewayTravel,
+                                embers::LOBBY.clone(),
+                            ));
+                        },
+                        |_environment, _entity, _duration| None,
+                        Duration::from_millis(200),
+                    ),
+                    EntityInteraction::new(
+                        INTERACTION_GATEWAY_TO_OPERATION.clone(),
+                        |environment, _entity| {
+                            environment.commands.trigger(Load::EnterDimension(
+                                DimensionEntryContext::GatewayTravel,
+                                embers::OPERATION.clone(),
+                            ));
                         },
                         |_environment, _entity, _duration| None,
                         Duration::from_millis(200),
@@ -880,6 +1098,10 @@ pub(super) fn plugin(app: &mut App) {
             ),
         )
         .init_resource::<LoadedDimensions>()
+        .add_systems(
+            Update,
+            tick_portal_timers.run_if(in_state(crate::ui::GameState::Dimension)),
+        )
         .add_observer(handle_dimension_generation_request)
         .add_observer(explode)
         .add_plugins(actor::plugin)

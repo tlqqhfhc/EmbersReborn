@@ -19,3 +19,12 @@ shp/**
 
 ### Mac OS ###
 .DS_Store
+
+### Windows ###
+Thumbs.db
+desktop.ini
+
+### TRAE ###
+.trae/*
+!.trae/rules/
+!.trae/plans/

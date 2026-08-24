@@ -445,6 +445,16 @@ fn process_input_movement(
 
 pub static KEY: LazyLock<NamespacedKey> = LazyLock::new(|| NamespacedKey::new_embers("player"));
 
+/// World-space position the player respawns at upon death.
+#[derive(Clone, Component, Copy, Debug)]
+pub struct SpawnPoint(pub Vec3);
+
+impl Default for SpawnPoint {
+    fn default() -> Self {
+        Self(Vec3::new(0., 1., 0.))
+    }
+}
+
 #[derive(Clone, Component, Default)]
 #[require(
     SelectedHotbarSlot,
@@ -452,7 +462,8 @@ pub static KEY: LazyLock<NamespacedKey> = LazyLock::new(|| NamespacedKey::new_em
     PlayerEntityInteractions,
     PlayerItemActionStatus,
     PlayerEquipmentItemActions,
-    PlayerInventory::new()
+    PlayerInventory::new(),
+    SpawnPoint
 )]
 pub struct Player;
 
@@ -650,6 +661,26 @@ pub fn player() -> impl Scene {
         living_actor(&KEY, false)
         Collider::cylinder(0.5, 1.7)
         Player
+    }
+}
+
+pub(in crate::dim) fn player_scene(spawn_point: Vec3) -> impl Scene {
+    bsn! {
+        #Player
+        Mesh3d(
+            asset_value(
+                Cylinder {
+                    radius: 0.5,
+                    half_height: 0.85,
+                }
+                .mesh(),
+            ),
+        )
+        MeshMaterial3d<StandardMaterial>(asset_value(Color::srgb(0.3, 0.5, 0.3)))
+        player()
+        Transform::from_translation(spawn_point)
+        SpawnPoint(spawn_point)
+        LinearVelocity::from(Vec3::new(0., 10., 0.))
     }
 }
 

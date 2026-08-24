@@ -334,6 +334,7 @@ pub fn path_to_unix_components<P: AsRef<Path>>(path: P) -> String {
 )]
 pub enum Void {}
 
+#[derive(Resource)]
 pub struct SystemRng<R: SeedableRng>(R);
 
 impl<R: SeedableRng> Deref for SystemRng<R> {

@@ -245,7 +245,15 @@ fn begin_loading(
                 });
             }
             DimensionEntryContext::GatewayTravel | DimensionEntryContext::PortalTravel => {
-                todo!();
+                commands.spawn_scene(bsn! {
+                    DimensionGenerationTask({dimension_key.clone()})
+                    TaskDependencies [
+                        ReloadMetadataTask
+                        TaskDependencies [
+                            FetchPayloadScopeTask({PayloadScopeId::Dimension(dimension_key.clone())})
+                        ]
+                    ]
+                });
             }
         },
         Load::EnterMainMenu(MainMenuEntryContext::Init) => {

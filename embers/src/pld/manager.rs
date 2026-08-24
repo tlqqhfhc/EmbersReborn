@@ -22,6 +22,7 @@ fn monitor_folder_loads(
     asset_server: Res<AssetServer>,
     mut payload_hold: ResMut<PayloadHold>,
 ) {
+    let mut completed = false;
     for folder_event in folder_events_reader.read() {
         let AssetEvent::LoadedWithDependencies { id } = folder_event else {
             continue;
@@ -29,10 +30,40 @@ fn monitor_folder_loads(
         let handle = asset_server.get_id_handle(*id).unwrap();
         if payload_hold.loading_scopes.remove(&handle) {
             payload_hold.loaded_scopes.insert(handle);
-            if payload_hold.loading_scopes.is_empty() {
-                commands.trigger(PayloadFetchingComplete);
-            }
+            completed = true;
         }
+    }
+    // bevy never emits `LoadedWithDependencies` when a folder load fails (e.g.
+    // a dimension with no payload directory) or when a folder is (re)loaded
+    // while already loaded. Poll for those terminal states so a fetch never
+    // waits forever; a missing folder counts as an empty scope.
+    let mut settled: Vec<(Handle<LoadedFolder>, bool)> = Vec::new();
+    for handle in payload_hold.loading_scopes.iter() {
+        let Some((state, _, recursive)) = asset_server.get_load_states(handle.id()) else {
+            continue;
+        };
+        if state.is_failed() {
+            settled.push((handle.clone(), true));
+        } else if state.is_loaded() && (recursive.is_loaded() || recursive.is_failed()) {
+            settled.push((handle.clone(), false));
+        }
+    }
+    for (handle, failed) in settled {
+        if failed {
+            warn!(
+                "Payload scope folder failed to load; treating it as empty: {:?}",
+                asset_server.get_path(handle.id())
+            );
+        }
+        if payload_hold.loading_scopes.remove(&handle) {
+            if !failed {
+                payload_hold.loaded_scopes.insert(handle);
+            }
+            completed = true;
+        }
+    }
+    if completed && payload_hold.loading_scopes.is_empty() {
+        commands.trigger(PayloadFetchingComplete);
     }
 }
 
