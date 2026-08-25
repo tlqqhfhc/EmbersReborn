@@ -16,7 +16,6 @@ use crate::ui::loading_screen::{DimensionEntryContext, Load};
 use crate::utils::{Keyed, NamespacedKey, SystemRng, template_bundle};
 use ai::{HitStun, LootTable};
 use attributes::{Attributes, AttributesTemplate, DamageTaken, KnockbackTaken, MaxHealth};
-use avian3d::prelude::SweptCcd;
 use bevy::ecs::template::TemplateContext;
 use bevy::prelude::*;
 use bevy_tnua::builtins::TnuaBuiltinKnockback;
@@ -91,8 +90,6 @@ pub fn living_actor(key: &NamespacedKey, interactable: bool) -> impl Scene {
         template_bundle(HealthTemplate)
         template(|_| Ok(TnuaController::<Movements>::default()))
         template_value(MovementConfigTemplate::new(key))
-        // Swept CCD prevents tunneling through thin walls at high knockback speeds.
-        template_value(SweptCcd::default())
     }
 }
 
