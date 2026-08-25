@@ -124,6 +124,62 @@ fn dimension_ground(size: f32) -> impl Scene {
     }
 }
 
+/// Perimeter walls that prevent dynamic bodies (player, mobs, items, projectiles) from
+/// falling off the edge of the dimension ground. Four static cuboid Environment-layer
+/// walls are placed on the ±X and ±Z edges of a `size × size` ground plane; the
+/// ±Z walls are lengthened to cover the corners, so there are no gaps.
+/// Note: `Collider::cuboid` takes FULL dimensions (same as the mesh), not half extents.
+fn dimension_barrier(size: f32) -> impl Scene {
+    const THICKNESS: f32 = 1.0;
+    const HEIGHT: f32 = 5.0;
+    let half = 0.5 * size;
+    let wall_color = Color::srgba(0.3, 0.4, 0.8, 0.18);
+    bsn! {
+        Children [
+            // +Z (north) wall (length = full width + 2 corners)
+            (
+                Mesh3d(asset_value(
+                    Cuboid::new(size + 2. * THICKNESS, HEIGHT, THICKNESS).mesh().build(),
+                ))
+                MeshMaterial3d::<StandardMaterial>(asset_value(wall_color))
+                { PhysicsPreset::Environment.physics(false) }
+                Collider::cuboid(size + 2. * THICKNESS, HEIGHT, THICKNESS)
+                template_value(Transform::from_xyz(0., 0.5 * HEIGHT, half + 0.5 * THICKNESS))
+            ),
+            // -Z (south) wall
+            (
+                Mesh3d(asset_value(
+                    Cuboid::new(size + 2. * THICKNESS, HEIGHT, THICKNESS).mesh().build(),
+                ))
+                MeshMaterial3d::<StandardMaterial>(asset_value(wall_color))
+                { PhysicsPreset::Environment.physics(false) }
+                Collider::cuboid(size + 2. * THICKNESS, HEIGHT, THICKNESS)
+                template_value(Transform::from_xyz(0., 0.5 * HEIGHT, -half - 0.5 * THICKNESS))
+            ),
+            // +X (east) wall (length = full width, fits inside the ±Z walls)
+            (
+                Mesh3d(asset_value(
+                    Cuboid::new(THICKNESS, HEIGHT, size).mesh().build(),
+                ))
+                MeshMaterial3d::<StandardMaterial>(asset_value(wall_color))
+                { PhysicsPreset::Environment.physics(false) }
+                Collider::cuboid(THICKNESS, HEIGHT, size)
+                template_value(Transform::from_xyz(half + 0.5 * THICKNESS, 0.5 * HEIGHT, 0.))
+            ),
+            // -X (west) wall
+            (
+                Mesh3d(asset_value(
+                    Cuboid::new(THICKNESS, HEIGHT, size).mesh().build(),
+                ))
+                MeshMaterial3d::<StandardMaterial>(asset_value(wall_color))
+                { PhysicsPreset::Environment.physics(false) }
+                Collider::cuboid(THICKNESS, HEIGHT, size)
+                template_value(Transform::from_xyz(-half - 0.5 * THICKNESS, 0.5 * HEIGHT, 0.))
+            ),
+        ]
+    }
+}
+
 fn lobby_scene() -> impl Scene {
     bsn! {
         #Dimension
@@ -137,6 +193,9 @@ fn lobby_scene() -> impl Scene {
             ),
             (
                 dimension_ground(20.)
+            ),
+            (
+                dimension_barrier(20.)
             ),
             (
                 gateway(&INTERACTION_GATEWAY_TO_OPERATION)
@@ -183,7 +242,7 @@ fn obstacle(center: Vec3, size: Vec3) -> impl Scene {
         Mesh3d(asset_value(Cuboid::new(size.x, size.y, size.z).mesh().build()))
         MeshMaterial3d<StandardMaterial>(asset_value(Color::srgb(0.45, 0.4, 0.35)))
         { PhysicsPreset::Environment.physics(false) }
-        Collider::cuboid(0.5 * size.x, 0.5 * size.y, 0.5 * size.z)
+        Collider::cuboid(size.x, size.y, size.z)
         template_value(Transform::from_translation(center))
     }
 }
@@ -202,6 +261,9 @@ fn operation_scene() -> impl Scene {
             ),
             (
                 dimension_ground(40.)
+            ),
+            (
+                dimension_barrier(40.)
             ),
             (
                 obstacle(OPERATION_OBSTACLES[0].0, OPERATION_OBSTACLES[0].1)
