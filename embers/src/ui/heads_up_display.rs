@@ -119,7 +119,7 @@ fn init(
                     position_type: PositionType::Absolute,
                     left: percent(50),
                     margin: UiRect::left(percent(-26)),
-                    top: px(4),
+                    top: px(-14),
                     width: percent(52),
                     height: px(5),
                 }
