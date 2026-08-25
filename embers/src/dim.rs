@@ -124,68 +124,6 @@ fn dimension_ground(size: f32) -> impl Scene {
     }
 }
 
-/// Invisible-looking (but clearly marked) perimeter walls that prevent dynamic bodies
-/// (player, mobs, items, projectiles) from falling off the edge of the dimension ground.
-/// Four static cuboid Environment-layer walls are placed on the ±X and ±Z edges
-/// of a `size × size` ground plane; the wall thickness is expanded onto corners so
-/// there are no corner gaps.
-///
-/// The walls are thick enough (2.0 units) to prevent high-speed knockback tunneling:
-/// `TnuaBuiltinKnockback` applies a linear impulse (via `apply_linear_impulse`) that can
-/// fling actors at up to ~20 u/s, and avian3d's default speculative collision can miss
-/// thin walls at such speeds. A thicker collider gives the solver enough margin to stop
-/// the body before it passes through.
-fn dimension_barrier(size: f32) -> impl Scene {
-    const THICKNESS: f32 = 2.0;
-    const HEIGHT: f32 = 5.0;
-    let half = 0.5 * size;
-    let wall_color = Color::srgba(0.3, 0.4, 0.8, 0.18);
-    bsn! {
-        Children [
-            // +Z (north) wall (length = full width + 2 corners)
-            (
-                Mesh3d(asset_value(
-                    Cuboid::new(size + 2. * THICKNESS, HEIGHT, THICKNESS).mesh().build(),
-                ))
-                MeshMaterial3d::<StandardMaterial>(asset_value(wall_color))
-                { PhysicsPreset::Environment.physics(false) }
-                Collider::cuboid(0.5 * (size + 2. * THICKNESS), 0.5 * HEIGHT, 0.5 * THICKNESS)
-                template_value(Transform::from_xyz(0., 0.5 * HEIGHT, half + 0.5 * THICKNESS))
-            ),
-            // -Z (south) wall
-            (
-                Mesh3d(asset_value(
-                    Cuboid::new(size + 2. * THICKNESS, HEIGHT, THICKNESS).mesh().build(),
-                ))
-                MeshMaterial3d::<StandardMaterial>(asset_value(wall_color))
-                { PhysicsPreset::Environment.physics(false) }
-                Collider::cuboid(0.5 * (size + 2. * THICKNESS), 0.5 * HEIGHT, 0.5 * THICKNESS)
-                template_value(Transform::from_xyz(0., 0.5 * HEIGHT, -half - 0.5 * THICKNESS))
-            ),
-            // +X (east) wall (length = full width, fits inside the +/-Z walls)
-            (
-                Mesh3d(asset_value(
-                    Cuboid::new(THICKNESS, HEIGHT, size).mesh().build(),
-                ))
-                MeshMaterial3d::<StandardMaterial>(asset_value(wall_color))
-                { PhysicsPreset::Environment.physics(false) }
-                Collider::cuboid(0.5 * THICKNESS, 0.5 * HEIGHT, 0.5 * size)
-                template_value(Transform::from_xyz(half + 0.5 * THICKNESS, 0.5 * HEIGHT, 0.))
-            ),
-            // -X (west) wall
-            (
-                Mesh3d(asset_value(
-                    Cuboid::new(THICKNESS, HEIGHT, size).mesh().build(),
-                ))
-                MeshMaterial3d::<StandardMaterial>(asset_value(wall_color))
-                { PhysicsPreset::Environment.physics(false) }
-                Collider::cuboid(0.5 * THICKNESS, 0.5 * HEIGHT, 0.5 * size)
-                template_value(Transform::from_xyz(-half - 0.5 * THICKNESS, 0.5 * HEIGHT, 0.))
-            ),
-        ]
-    }
-}
-
 fn lobby_scene() -> impl Scene {
     bsn! {
         #Dimension
@@ -199,9 +137,6 @@ fn lobby_scene() -> impl Scene {
             ),
             (
                 dimension_ground(20.)
-            ),
-            (
-                dimension_barrier(20.)
             ),
             (
                 gateway(&INTERACTION_GATEWAY_TO_OPERATION)
@@ -267,9 +202,6 @@ fn operation_scene() -> impl Scene {
             ),
             (
                 dimension_ground(40.)
-            ),
-            (
-                dimension_barrier(40.)
             ),
             (
                 obstacle(OPERATION_OBSTACLES[0].0, OPERATION_OBSTACLES[0].1)
