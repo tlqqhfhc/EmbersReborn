@@ -9,16 +9,18 @@ pub mod zombie;
 use super::actor;
 use crate::dim::actor::item_actor::item_actor_of;
 use crate::dim::item::item_stack;
-use crate::dim::{Movements, MovementsConfig, PhysicsPreset};
+use crate::dim::{ActiveDimension, Dimension, Movements, MovementsConfig, PhysicsPreset};
 use crate::pld::foundry::PayloadTemplate;
-use crate::utils::{NamespacedKey, SystemRng, template_bundle};
+use crate::ui::ActiveOverlay;
+use crate::ui::loading_screen::{DimensionEntryContext, Load};
+use crate::utils::{Keyed, NamespacedKey, SystemRng, template_bundle};
 use ai::{HitStun, LootTable};
 use attributes::{Attributes, AttributesTemplate, DamageTaken, KnockbackTaken, MaxHealth};
 use bevy::ecs::template::TemplateContext;
 use bevy::prelude::*;
 use bevy_tnua::builtins::TnuaBuiltinKnockback;
 use bevy_tnua::prelude::*;
-use player::{Player, SpawnPoint};
+use player::{Player, PlayerInventory, SpawnPoint};
 use rand::rngs::SmallRng;
 
 #[derive(Component, Debug, Default)]
@@ -140,8 +142,11 @@ fn damage(
         &Attributes<MaxHealth>,
         Option<&LootTable>,
         Option<&SpawnPoint>,
+        Option<&mut PlayerInventory>,
         Has<Player>,
     )>,
+    active_dimension: Option<Single<&Dimension, With<ActiveDimension>>>,
+    active_overlay: Res<State<ActiveOverlay>>,
 ) {
     for Damage {
         target,
@@ -166,6 +171,7 @@ fn damage(
             max_health,
             loot_table,
             spawn_point,
+            inventory,
             is_player,
         )) = living_actors.get_mut(*target)
         else {
@@ -204,13 +210,30 @@ fn damage(
             if is_player {
                 // Respawn the player.
                 health.0 = max_health.value();
-                if let Some(spawn_point) = spawn_point {
-                    local_transform.translation = spawn_point.0;
-                }
                 controller.action_interrupt(Movements::Knockback(TnuaBuiltinKnockback {
                     shove: Vec3::ZERO,
                     force_forward: None,
                 }));
+                let in_battle = active_dimension
+                    .as_ref()
+                    .is_some_and(|dimension| dimension.key() != &*crate::dim::embers::LOBBY);
+                if in_battle && **active_overlay != ActiveOverlay::LoadingScreen {
+                    // Extraction penalty: everything carried is lost, warp back to the lobby.
+                    // The dimension generation of the warp teleports the player to the lobby spawn point.
+                    if let Some(mut inventory) = inventory {
+                        for slot in 0..inventory.size() {
+                            if let Some(item) = inventory[slot].take() {
+                                commands.entity(item).despawn();
+                            }
+                        }
+                    }
+                    commands.trigger(Load::EnterDimension(
+                        DimensionEntryContext::PortalTravel,
+                        crate::dim::embers::LOBBY.clone(),
+                    ));
+                } else if let Some(spawn_point) = spawn_point {
+                    local_transform.translation = spawn_point.0;
+                }
             } else {
                 // Drop loot and despawn.
                 if let Some(loot_table) = loot_table {
