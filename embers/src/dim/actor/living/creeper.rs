@@ -42,6 +42,10 @@ pub fn creeper() -> impl Scene {
     bsn! {
         living_actor(&KEY, false)
         Collider::cylinder(0.5, 1.7)
+        Mesh3d(asset_value(
+            Cylinder { radius: 0.5, half_height: 0.85 }.mesh(),
+        ),)
+        MeshMaterial3d::<StandardMaterial>(asset_value(Color::srgb(0.1, 0.35, 0.1)))
         Creeper(CreeperState::Idle)
         AiPerception {
             sight_range: 20.,
