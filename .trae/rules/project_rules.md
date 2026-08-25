@@ -50,15 +50,16 @@ TOML 定义 → 运行时资产的编译管线。`compile_definitions` 泛型系
 维度与全局战斗框架：
 - `Dimension(key)`/`ActiveDimension`/`LoadedDimensions`/`DimensionGenerationRequest`。
 - 维度场景按 key 分发（P1 ✅）：`handle_dimension_generation_request` 先 despawn 旧维度（despawn 命令先入队、spawn_scene 后入队，flush 顺序保证 `ActiveDimension` 唯一，`ActorTemplate` 的 single 查询才安全）→ 按 key 生成：
-  - `lobby_scene`：20×20 白色地面（Plane3d+heightfield）+ gateway→operation（0,0,-5）+ dummy（5,0.5,0）。
-  - `operation_scene`（P2 ✅）：40×40 地面 + 7 个 cuboid 障碍（`OPERATION_OBSTACLES` 常量表 (center,size)，`obstacle()` 场景 = Mesh3d cuboid + 棕灰 StandardMaterial + `{ PhysicsPreset::Environment.physics(false) }` + 显式 `Collider::cuboid(半尺寸)`）+ 根实体挂 **PortalTimer（90s Once）**。**P2 移除了初始 gateway**——operation 内的传送门只在 90s 后由 PortalTimer 生成。
+  - `lobby_scene`：20×20 白色地面（Plane3d+heightfield）+ `dimension_barrier(20.)` + gateway→operation（0,0,-5）+ dummy（5,0.5,0）。
+  - `dimension_barrier(size)`（空气墙，防掉落/穿墙 ✅）：四面静态 Environment 层墙围住 `size×size` 地面（±X/±Z 边），厚 1.0、高 5.0，半透明蓝；**±Z 墙加长 `2×THICKNESS` 覆盖两角，无缝隙**；半透明 `srgba(0.3,0.4,0.8,0.18)`。碰撞体与网格**全尺寸一致**（`Collider::cuboid(size+2, 5, 1)` / `Collider::cuboid(1, 5, size)`，见下方"全尺寸"坑）。lobby/operation 各挂一组（20./40.）。
+  - `operation_scene`（P2 ✅）：40×40 地面 + `dimension_barrier(40.)` + 7 个 cuboid 障碍（`OPERATION_OBSTACLES` 常量表 (center,size)，`obstacle()` 场景 = Mesh3d cuboid + 棕灰 StandardMaterial + `{ PhysicsPreset::Environment.physics(false) }` + 显式 `Collider::cuboid(全尺寸)`）+ 根实体挂 **PortalTimer（90s Once）**。**P2 移除了初始 gateway**——operation 内的传送门只在 90s 后由 PortalTimer 生成。
   - `unknown_dimension_scene`：最小场景（光+20×20 地面）+ warn 日志。
   - `dimension_spawn_point`：lobby=(0,1,0)、operation=(0,1,18)、其他=(0,1,0)。
 - **operation 内容随机刷取（P2 ✅）**：`handle_dimension_generation_request` 在 key=OPERATION 生成后调 `spawn_operation_content(commands, &mut rng)`（参数 `ResMut<SystemRng<SmallRng>>`）：`creeper()`×3 + `zombie(ZombieWeapon::roll(rng))`×5 + `item_actor_of(item_stack(key))`×10（8×EMBER_SHARD + 2×SWORD/SPEAR 各半随机），各自 `template_value(Transform::from_translation(random_operation_position(rng)))`。`random_operation_position`：±16 边界（OPERATION_SPAWN_BOUND）、y=1、距入口 (0,1,18) ≥6（ENTRY_CLEAR_RADIUS）、16 次重试、fallback (0,1,-16)。常量：CREEPER_SPAWN_COUNT=3、ZOMBIE_SPAWN_COUNT=5、SCATTERED_SHARD_COUNT=8、SCATTERED_WEAPON_COUNT=2、OPERATION_PORTAL_DELAY_SECS=90、OPERATION_PORTAL_SPAWN=(0,0.5,0)。
 - **PortalTimer（P2 ✅）**：`pub struct PortalTimer(Timer)`（Component，挂 operation 根）；`tick_portal_timers`（Update，run_if `GameState::Dimension`）对 `(Entity, &mut PortalTimer), (With<Dimension>, With<ActiveDimension>)` tick 定时器，`just_finished()`（Once 模式只触发一帧）时 spawn `gateway(&INTERACTION_GATEWAY_TO_LOBBY)` 于 (0,0.5,0) 并 ChildOf 维度根——**传送门常驻**（不消失；维度 despawn 时随根实体一起销毁）。
 - **玩家与维度子树解耦（P1 ✅）**：玩家 ChildOf `RootNode`（不在维度实体下）；维度生成时若玩家已存在→瞬移（Transform+SpawnPoint+LinearVelocity 清零，背包物品 ChildOf 玩家自然保留），不存在→`player_scene` 新建。
 - 物理：`CollisionLayer`（Interactable/LivingActor/MiscActor/Phantom/Projectile/Environment）+ `PhysicsPreset`（dominance、轴锁定、**仅 Environment 预设是 `RigidBody::Static`，其余恒为 `Dynamic`**）+ `SourceExclusionCollisionHooks`（碰撞源排除，SparseSet，有 benchmark TODO）。
-- **avian3d 0.7 物理坑（实测）**：① 默认特性 `collider-from-mesh`/`default-collider` 已开，但 **Mesh3d 本身不产生 collider**，须显式加 `Collider` 或 `ColliderConstructor`（现有 actor/item_actor 都是显式 `Collider::cylinder/cuboid`）。② `Dynamic` 刚体即便无 collider 也受重力 → 会掉穿地面（gateway 曾因此掉落，改 Static 解决）。③ E 键交互用 `SpatialQuery::shape_intercepts` 查 `Interactable` 层 collider，实体必须有挂 Interactable 层的 collider 才能被检测到。④ bsn! 里覆盖 preset 的 RigidBody 用 `template_value(RigidBody::Static)`（裸 `RigidBody::Static` 会走 patch 机制报 `default_static` 错）；后写的组件覆盖先写（含嵌套场景的）。
+- **avian3d 0.7 物理坑（实测）**：① 默认特性 `collider-from-mesh`/`default-collider` 已开，但 **Mesh3d 本身不产生 collider**，须显式加 `Collider` 或 `ColliderConstructor`（现有 actor/item_actor 都是显式 `Collider::cylinder/cuboid`）。② `Dynamic` 刚体即便无 collider 也受重力 → 会掉穿地面（gateway 曾因此掉落，改 Static 解决）。③ E 键交互用 `SpatialQuery::shape_intercepts` 查 `Interactable` 层 collider，实体必须有挂 Interactable 层的 collider 才能被检测到。④ bsn! 里覆盖 preset 的 RigidBody 用 `template_value(RigidBody::Static)`（裸 `RigidBody::Static` 会走 patch 机制报 `default_static` 错）；后写的组件覆盖先写（含嵌套场景的）。⑤ **`Collider::cuboid(x,y,z)` 接收全尺寸**（内部 `*0.5`，见 parry/mod.rs），与网格 `Cuboid::new(全尺寸)` 同语义；**传半尺寸 → 碰撞体只有视觉一半**（空气墙穿墙 bug 真根因：加厚版墙碰撞体只覆盖中央段，40m 地图角落 (±20,±20) 无碰撞体可直接走出去；obstacle 同款 bug 已修）。⑥ **PhysicsLayer 宏位分配**：`#[default]` variant 被提到声明顺序最前，再按（调整后）顺序从 bit 0 分配 `1<<i`。本项目实际 bit：**Phantom=1、Interactable=2、LivingActor=4、MiscActor=8、Projectile=16、Environment=32**（Phantom 是 `#[default]`；调 enum 顺序/挪 `#[default]` 会整体改 bit 值，勿假设）。⑦ **spawn 时 `CollisionLayers` 必须写在 `Collider` 之前**（同实体内）：collider_tree 的 Case 9 observer 只响应 CollisionLayers 的 Insert 更新 proxy layers；Collider 先插、CollisionLayers 后插时 proxy 保持默认 (1, ALL) → 碰撞对不上（实测球穿一切）。
 - `Movements`（Tnua scheme：Knockback/Sneak/Roll，basis=TnuaBuiltinWalk）；`MovementsConfig` payload（per-actor 移动参数，root=`movements_configs`）。
 - **Action 框架**：`Action` trait（on_begin/on_end→Option<next_action_key>/duration）、`ActionSlots`（click/double_click 两槽）、`ActionStatus`（Idle/Active+Stopwatch）、泛型系统 `update_action`（动作执行+链条+`ActionInterruption` 打断，经 Tag 匹配）。
 - `EntityInteraction` 资产（root=`entity_interactions`）：E 键实体交互，PreStartup 注入三个内置：`item_actor/pickup`（200ms，物品移入玩家背包）、`gateway_to_lobby`/`gateway_to_operation`（200ms，直接触发 `Load::EnterDimension(GatewayTravel, 目标维度)`，不开菜单）。
@@ -95,7 +96,7 @@ TOML 定义 → 运行时资产的编译管线。`compile_definitions` 泛型系
 `LivingActor` 标记；`Health(f32)`（按 MaxHealth 属性初始化）。
 `living_actor(key, interactable)` 通用生物场景 = actor + 物理预设 + AttributesTemplate + Health + TnuaController<Movements> + MovementConfigTemplate（按 actor key 解析 MovementsConfig payload）。
 消息：`Damage { target, amount, knockback, source }`、`DamageNumber { position, amount }`；`DamageKnockback`（Directional/Radial 默认 20/None）；`DamageSource { origin, causing_entity, direct_entity }`（⚠️ 后两者在 damage 系统里被丢弃，无仇恨归因）。
-`damage` 系统：属性减免（DamageTaken.value_for）→ 扣血 → DamageNumber 飘字（头顶 +1.5）→ 击退（Tnua Knockback 动作，可打断当前动作，受 KnockbackTaken 属性）→ HitStun 0.25s → 死亡：**玩家=回满血+瞬移 SpawnPoint（无死亡 UI）；怪物=按 LootTable 在死亡点 +0.5Y 生成 item_actor 后 despawn**（LootTable 每项一个 item_actor，重复条目=多件掉落）。
+`damage` 系统：属性减免（DamageTaken.value_for）→ 扣血 → DamageNumber 飘字（头顶 +1.5）→ 击退（Tnua Knockback 动作，可打断当前动作，受 KnockbackTaken 属性）→ HitStun 0.25s → 死亡：**玩家（P3 ✅ 搜打撤惩罚）=回满血+清空击退动作；若当前在非 lobby 维度且非 LoadingScreen 态→清空背包（全槽 despawn）+ `Load::EnterDimension(PortalTravel, LOBBY)` 传送回 lobby（维度生成把玩家放到 lobby 出生点）；否则（lobby 内/加载态）=瞬移 SpawnPoint 兜底；怪物=按 LootTable 在死亡点 +0.5Y 生成 item_actor 后 despawn**（LootTable 每项一个 item_actor，重复条目=多件掉落）。
 plugin：`init_resource::<SystemRng<SmallRng>>()` + Update `(damage, creeper::system, zombie::system).run_if(in_state(Dimension))` + ai/damage_number 子插件。
 
 ### dim/actor/living/player.rs
@@ -227,7 +228,7 @@ Grid：标题 + Audio/Controls/Language/Video 四按钮（切对应 overlay，�
 5. ⚠️ projectile.rs 完全未实现；charged_throw 只 println。
 6. ⚠️ 选项子页全部死状态（video 空文件未注册，audio/controls/language 无文件）。
 7. ⚠️ MeleeDamage 属性无消费方；Enchantments/RangedAmmo 空组件；护甲槽无效果。
-8. ⚠️ Creeper/Zombie 均为圆柱占位模型（Zombie 有 LootTable=2×ember_shard，Creeper 无掉落）；玩家是圆柱占位；玩家死亡=满血原地重生（无死亡流程，P3 改）；地面物品无动画/无消失时限；怪物直线 chase 无寻路（可能卡死在障碍物上）。
+8. ⚠️ Creeper/Zombie 均为圆柱占位模型（Zombie 有 LootTable=2×ember_shard，Creeper 无掉落）；玩家是圆柱占位；玩家死亡无死亡 UI/流程（P3 已加背包清空+回 lobby 惩罚，但仍无确认界面）；地面物品无动画/无消失时限；怪物直线 chase 无寻路（可能卡死在障碍物上）。
 9. ⚠️ 无音频系统（sounds payload 根已声明但无文件）；无改键 UI；无世界选择（Play 硬编码 lobby）；加载逻辑自述有缺陷（L44 TODO: Fix）。
 10. ⚠️ 爆炸不破坏方块、不连锁 TNT（dim.rs L782 TODO）。
 
@@ -235,6 +236,7 @@ Grid：标题 + Audio/Controls/Language/Video 四按钮（切对应 overlay，�
 目标：搜打撤核心循环 —— lobby 合成装备 → 进地图战斗/拾取物资 → 限时后出现传送门 → 传送回 lobby。UI 缺陷/设置页暂缓。计划文件：`.trae/plans/extraction-core-loop.md`。
 - P1 维度传送机制 ✅（用户已实测验收）：维度场景按 key 分发（lobby/operation）、双向 gateway 直接触发 Load、GatewayTravel 任务图、玩家/背包与维度解耦。已修两个 bug：① gateway 掉穿地面（改 Static 刚体 + 显式 collider）；② 卡在 "Preparing warp"（manager 轮询加载状态，处理"目录不存在"/"重复加载已加载目录"不发事件的情况）。
 - P2 operation 战斗地图 ✅（2026-08-24 完成并运行时自动验证）：40×40 地面 + 7 cuboid 障碍；场景生成时随机刷 creeper×3 + zombie×5（避开入口半径 6）+ 散落 10 物资（8×ember_shard + 2×随机武器）；PortalTimer(90s) 到期生成回 lobby 的传送门（常驻）；zombie=新近战怪（生成时随机武器 4/3/3 剑/矛/空手，复用 MeleeStrike）；近战共享化 `MeleeStrike` + **扇形朝向 +90°Y 修正（玩家攻击方向也变了，用户实测需确认）**；ember_shard.item.toml 提前创建（P4 用）。运行时验证（env EMBERS_AUTO_TEST 门控临时代码，验证后已清除，main.rs 归零）：刷怪数 3/5/10 正确、僵尸近战命中玩家（-7=矛伤）、传送门恰在进图 90s 出现（interactables 10→11 常驻）、0 模板错误。踩坑：**zombie.actor.toml 未手动复制到 shp → 场景构建失败**（见"pld→shp 手动镜像"）。fmt/clippy/test(34) 通过，待用户手动实测。
-- P3 待完成：死亡惩罚（operation 死亡=清空背包+回 lobby 满血重生；lobby 死亡=原地满血兜底）。
+- P3 死亡惩罚 ✅（用户已实测验收）：operation 死亡=清空背包+PortalTravel 回 lobby 满血重生；lobby 死亡/加载态=瞬移 SpawnPoint 兜底（实现见 living.rs `damage` 死亡分支）。
+- 空气墙穿墙 bug ✅（2026-08-25 定位修复）：用户报"走到角落直接出去/击退穿墙"。曾两次错误修复（加厚墙 2.0、LivingActor 加 SweptCcd）均无效，已 `git revert` 回滚。真根因=**`Collider::cuboid` 收全尺寸，原代码传了半尺寸**→墙碰撞体只有视觉一半长，40m 地图角落无碰撞体；修复=重写 `dimension_barrier`（全尺寸、厚 1.0、±Z 墙加长盖角）+ `obstacle()` 同款修复。运行时验证（env 门控临时 autotest，已清除，main.rs 归零）：4 墙 collider (42,5,1)/(1,5,40) 位置/layers(32,29)/static tree 注册全部正确；同层碰撞对实测通过（LivingActor 球落在地面滚动）。待用户实测：走到角落、击退/爆炸是否还穿墙。
 - P4 待完成：合成系统（配方 8×shard→sword / 12×shard→spear / 4×shard→tnt、合成站实体、Crafting overlay）。
 - P5 待完成：初始物资（8×ember_shard 进图携带）+ 数值调参 + 端到端验证。
