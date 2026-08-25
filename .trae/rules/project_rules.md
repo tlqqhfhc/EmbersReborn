@@ -66,6 +66,7 @@ TOML 定义 → 运行时资产的编译管线。`compile_definitions` 泛型系
 - `Explosion` 事件 + `explode` observer：一次爆炸粒子（bevy_sprinkles）+ 球形范围（radius=power*2）LivingActor 查询，衰减伤害 `7*(x²+x)*power+1` + 方向击退 17*x。`// TODO consider more realistic explosions`（不破坏方块、不连锁）。
 - `WorldTime(f32)` 组件（0..1 一天中的时刻，默认 0.25，**无驱动系统**）。
 - `gateway(interaction: &NamespacedKey)` 场景（3×1×3 黑立方，**unlit 黑色剪影**（不依赖光照，白色地面上可见）+ `PhysicsPreset::Phantom.physics(true)` 后 **`template_value(RigidBody::Static)` 覆盖为静态刚体**（portal 不该受重力，否则掉穿地面）+ **显式 `Collider::cuboid(1.5,0.5,1.5)`**（E 键靠 SpatialQuery 查 Interactable 层 collider，无 collider 则检测不到）+ Interactable 绑定传入交互键，P1 参数化）；lobby 实例 (0,0.5,-5)；operation 实例 P2 移除（改为 PortalTimer 90s 后在 (0,0.5,0) 生成）。`INTERACTION_GATEWAY_TO_LOBBY`("embers:gateway_to_lobby")、`INTERACTION_GATEWAY_TO_OPERATION`("embers:gateway_to_operation")。
+- `dimension_barrier(size)` 场景（P3 bugfix：空气墙；P3b bugfix：加厚防击退隧道）：以 ±(size/2+1.0), y=2.5 为四边中心放置 4 个静态 Environment 层 cuboid（**厚 2.0**、高 5、长度=size 或 size+4；角部南北墙伸出两端包住 X 墙，无角缝）；半透明淡蓝视觉 `srgba(0.3, 0.4, 0.8, 0.18)` 提示边界；`Collider::cuboid(半尺寸)` 与障碍同模板；挂在两维度 Ground 后（lobby size=20、operation size=40），防 Dynamic 刚体（玩家/怪/物品）掉出高度场覆盖区。**P3b 加厚原因**：`TnuaBuiltinKnockback.shove` 经 `apply_motors_system` 转成 `apply_linear_impulse`（线性冲量），击退速度最大 ~20 u/s；原 0.5 厚空气墙在高速击退下被 avian3d speculative collision 隧穿（用户实测"被攻击击退时穿过了空气墙"）。加厚到 2.0（4 倍）后，60Hz 物理步一帧位移 ~0.33u << 2u，求解器有 6 帧余量阻止穿透。avian3d 文档首推"加厚墙"防隧道方案（`SweptCcd` 为 opt-in 兜底，未启用）。
 - `embers::ASSEMBLY_APEX`("embers:assembly_apex")、`embers::LOBBY`("embers:lobby")、`embers::OPERATION`("embers:operation") 维度键常量。
 
 ### dim/block.rs
@@ -95,7 +96,7 @@ TOML 定义 → 运行时资产的编译管线。`compile_definitions` 泛型系
 `LivingActor` 标记；`Health(f32)`（按 MaxHealth 属性初始化）。
 `living_actor(key, interactable)` 通用生物场景 = actor + 物理预设 + AttributesTemplate + Health + TnuaController<Movements> + MovementConfigTemplate（按 actor key 解析 MovementsConfig payload）。
 消息：`Damage { target, amount, knockback, source }`、`DamageNumber { position, amount }`；`DamageKnockback`（Directional/Radial 默认 20/None）；`DamageSource { origin, causing_entity, direct_entity }`（⚠️ 后两者在 damage 系统里被丢弃，无仇恨归因）。
-`damage` 系统：属性减免（DamageTaken.value_for）→ 扣血 → DamageNumber 飘字（头顶 +1.5）→ 击退（Tnua Knockback 动作，可打断当前动作，受 KnockbackTaken 属性）→ HitStun 0.25s → 死亡：**玩家=回满血+瞬移 SpawnPoint（无死亡 UI）；怪物=按 LootTable 在死亡点 +0.5Y 生成 item_actor 后 despawn**（LootTable 每项一个 item_actor，重复条目=多件掉落）。
+`damage` 系统：属性减免（DamageTaken.value_for）→ 扣血 → DamageNumber 飘字（头顶 +1.5）→ 击退（Tnua Knockback 动作，可打断当前动作，受 KnockbackTaken 属性）→ HitStun 0.25s → 死亡：**怪物=按 LootTable 在死亡点 +0.5Y 生成 item_actor 后 despawn**（LootTable 每项一个 item_actor，重复条目=多件掉落）；**玩家=P3 ✅ 死亡惩罚**：恒回满血+清零 Knockback 动作；若当前维度 ≠ lobby（`Option<Single<&Dimension, With<ActiveDimension>>>` 比较 `key() != &*embers::LOBBY`）**且** ActiveOverlay ≠ LoadingScreen（防连续死亡重入，如双 creeper 爆炸）→ **清空整个 PlayerInventory**（`for slot in 0..inventory.size() { inventory[slot].take() → commands.despawn }`）**+ `commands.trigger(Load::EnterDimension(PortalTravel, embers::LOBBY))` 传送回 lobby**（Load 流程负责瞬移到 lobby spawn point，满血抵达）；否则（lobby 死亡/加载中）=瞬移 SpawnPoint 原地重生。系统额外参数 `active_dimension`/`active_overlay: Res<State<ActiveOverlay>>`，查询含 `Option<&mut PlayerInventory>`（内层 `if let Some(mut inventory)` 需 mut 绑定才能 IndexMut take）。
 plugin：`init_resource::<SystemRng<SmallRng>>()` + Update `(damage, creeper::system, zombie::system).run_if(in_state(Dimension))` + ai/damage_number 子插件。
 
 ### dim/actor/living/player.rs
@@ -113,7 +114,7 @@ plugin：`init_resource::<SystemRng<SmallRng>>()` + Update `(damage, creeper::sy
 AI 公共积木（设计：每怪一个 enum 状态机 + 专属系统）：`AiTarget(Option<Entity>)`、`AiPerception { sight_range=24, attack_range=2 }`、`AttackCooldown(1s Repeating)`（P2 起 zombie 使用）、`HitStun(0.25s Once)`、`LootTable(Vec<NamespacedKey>)`（无权重，Clone，**重复条目=多件掉落**）。系统：`perceive_targets`（视野内最近玩家，无视线遮挡，O(怪×玩家)）、`chase(controller, perception, my_translation, target_translation, speed)`（Tnua Walk 直线，desired_motion=方向×**speed**，P2 加 speed 参数——Tnua walk config 的 speed 默认 20 = 单位运动向量时的速度，不缩放则怪速 2× 于玩家；调用方传 `movement_speed.value()`；返回是否进攻击范围）、`tick_status`（全局 tick 所有 HitStun+AttackCooldown）。⚠️ 直线 chase 无寻路，怪可能卡死在障碍物上（P2 实测）。
 
 ### dim/actor/living/creeper.rs
-`CreeperState { Idle, Chase, Fuse(f32) }`（Fuse 1.5s → Explosion power 4 → despawn）。`creeper()` 场景：living_actor + 圆柱碰撞体 + AiPerception{20, 1.5}。⚠️ 无 glTF 模型（裸圆柱）、无 LootTable（死亡无掉落）、Fuse 无膨胀/音效表现。系统 `creeper::system`：感知→追（chase speed=`movement_speed.value()`，P2）→引信；HitStun 期间冻结状态推进（不能取消引爆）。
+`CreeperState { Idle, Chase, Fuse(f32) }`（Fuse 1.5s → Explosion power 4 → despawn）。`creeper()` 场景：living_actor + `Collider::cylinder(0.5,1.7)` + **深绿色圆柱占位网格**（`Color::srgb(0.1, 0.35, 0.1)`，P3 bugfix：此前 creeper 无 Mesh 完全隐形=看不见，与僵尸的亮绿区分）+ AiPerception{20, 1.5}。⚠️ 无 glTF 模型、无 LootTable（死亡无掉落）、Fuse 无膨胀/音效表现。系统 `creeper::system`：感知→追（chase speed=`movement_speed.value()`，P2）→引信；HitStun 期间冻结状态推进（不能取消引爆）。
 
 ### dim/actor/living/zombie.rs
 P2 ✅ 近战怪（新文件）。`Zombie(ZombieState)`（Clone+Component，`#[require(AiTarget, AiPerception, AttackCooldown)]`）；`ZombieState { Idle, Chase, Attack }`（Attack 次帧回 Chase）。`ZombieWeapon { BareHand(default), Sword, Spear }` + `roll(rng: &mut impl RngExt)`（4/3/3：`random_range(0..10)`）。打击：剑=`MeleeStrike(6,6,120°,2)`、矛=`MeleeStrike(7,7,30°,2.5)`（均 `LazyLock<MeleeStrike>` 预计算）、空手=距目标 ≤1.5 直接 `Damage` 2-4（`random_range`）+径向击退 5（无扇形）。`zombie(weapon)` 场景：`living_actor(&KEY, false)` + `Collider::cylinder(0.5, 1.7)` + 绿色圆柱网格（srgb(0.15,0.8,0.1)）+ **`template_value(weapon)`**（枚举不能走 bsn patch 语法）+ AiPerception{24,2} + `LootTable(vec![EMBER_SHARD; 2])`。系统 `zombie::system`（查询排除 Player）：感知→追（speed=movement_speed 属性）→ Chase 且 in_range 且冷却就绪（let-chain）→ 按武器 strike + `cooldown.0.reset()` + 状态 Attack；HitStun 冻结状态推进。⚠️ 无 glTF 模型（绿色圆柱占位）。
@@ -168,7 +169,7 @@ P2 ✅ 近战怪（新文件）。`Zombie(ZombieState)`（Clone+Component，`#[r
 - Exit 链：GameStateTransition(MainMenu) ← ReloadMetadata ← EvictScope(当前维度)；SaveAndExit 并行加 WorldSavingTask。
 
 ### ui/heads_up_display.rs
-HUD（最完整的 overlay）：进入时锁定光标（Confined）。6 格快捷栏（16×16 物品图标 + hud/hotbar 背景 + 可移动高亮指示框）+ 主手槽（hud/main_hand 背景）+ 血条（底+红填充）。系统：`update_health_bar`（宽度比例）、`update_hotbar_selection_indicator`（SelectedHotbarSlot 驱动）、`update_hotbar`（Changed<Inventory> 时刷新图标）。OnExit 释放光标。
+HUD（最完整的 overlay）：进入时锁定光标（Confined）。根节点 185×18 居中底部（bottom=7px），横排 flex：6 格快捷栏（122×22 图，16×16 物品图标 + hud/hotbar 背景 + 可移动高亮指示框）+ 主手槽（22×22，hud/main_hand 背景）+ 血条（**绝对定位在快捷栏上方**：top=px(-14)，根节点高 18px < 快捷栏图 22px，放根节点内部会与槽位重合——P3 实测上移）底+红填充，宽 52% 居中。系统：`update_health_bar`（宽度比例）、`update_hotbar_selection_indicator`（SelectedHotbarSlot 驱动）、`update_hotbar`（Changed<Inventory> 时刷新图标）。OnExit 释放光标。
 
 ### ui/inventory.rs
 ⚠️ 占位：仅 "Inventory" 文本，无格子/拖拽/交互。`fina()` 空。
@@ -227,7 +228,7 @@ Grid：标题 + Audio/Controls/Language/Video 四按钮（切对应 overlay，�
 5. ⚠️ projectile.rs 完全未实现；charged_throw 只 println。
 6. ⚠️ 选项子页全部死状态（video 空文件未注册，audio/controls/language 无文件）。
 7. ⚠️ MeleeDamage 属性无消费方；Enchantments/RangedAmmo 空组件；护甲槽无效果。
-8. ⚠️ Creeper/Zombie 均为圆柱占位模型（Zombie 有 LootTable=2×ember_shard，Creeper 无掉落）；玩家是圆柱占位；玩家死亡=满血原地重生（无死亡流程，P3 改）；地面物品无动画/无消失时限；怪物直线 chase 无寻路（可能卡死在障碍物上）。
+8. ⚠️ Creeper/Zombie 均为圆柱占位模型（Zombie 有 LootTable=2×ember_shard，Creeper 无掉落）；玩家是圆柱占位；玩家死亡无死亡 UI（战斗维度死亡=清空背包回 lobby，P3 ✅；lobby 死亡=原地满血）；地面物品无动画/无消失时限；怪物直线 chase 无寻路（可能卡死在障碍物上）。
 9. ⚠️ 无音频系统（sounds payload 根已声明但无文件）；无改键 UI；无世界选择（Play 硬编码 lobby）；加载逻辑自述有缺陷（L44 TODO: Fix）。
 10. ⚠️ 爆炸不破坏方块、不连锁 TNT（dim.rs L782 TODO）。
 
@@ -235,6 +236,6 @@ Grid：标题 + Audio/Controls/Language/Video 四按钮（切对应 overlay，�
 目标：搜打撤核心循环 —— lobby 合成装备 → 进地图战斗/拾取物资 → 限时后出现传送门 → 传送回 lobby。UI 缺陷/设置页暂缓。计划文件：`.trae/plans/extraction-core-loop.md`。
 - P1 维度传送机制 ✅（用户已实测验收）：维度场景按 key 分发（lobby/operation）、双向 gateway 直接触发 Load、GatewayTravel 任务图、玩家/背包与维度解耦。已修两个 bug：① gateway 掉穿地面（改 Static 刚体 + 显式 collider）；② 卡在 "Preparing warp"（manager 轮询加载状态，处理"目录不存在"/"重复加载已加载目录"不发事件的情况）。
 - P2 operation 战斗地图 ✅（2026-08-24 完成并运行时自动验证）：40×40 地面 + 7 cuboid 障碍；场景生成时随机刷 creeper×3 + zombie×5（避开入口半径 6）+ 散落 10 物资（8×ember_shard + 2×随机武器）；PortalTimer(90s) 到期生成回 lobby 的传送门（常驻）；zombie=新近战怪（生成时随机武器 4/3/3 剑/矛/空手，复用 MeleeStrike）；近战共享化 `MeleeStrike` + **扇形朝向 +90°Y 修正（玩家攻击方向也变了，用户实测需确认）**；ember_shard.item.toml 提前创建（P4 用）。运行时验证（env EMBERS_AUTO_TEST 门控临时代码，验证后已清除，main.rs 归零）：刷怪数 3/5/10 正确、僵尸近战命中玩家（-7=矛伤）、传送门恰在进图 90s 出现（interactables 10→11 常驻）、0 模板错误。踩坑：**zombie.actor.toml 未手动复制到 shp → 场景构建失败**（见"pld→shp 手动镜像"）。fmt/clippy/test(34) 通过，待用户手动实测。
-- P3 待完成：死亡惩罚（operation 死亡=清空背包+回 lobby 满血重生；lobby 死亡=原地满血兜底）。
+- P3 死亡惩罚 ✅（2026-08-24 完成并运行时自动验证）：战斗维度（≠lobby）死亡=清空整个 PlayerInventory（物品实体 despawn，永久丢失）+ 回满血 + `Load::EnterDimension(PortalTravel, lobby)` 传送回 lobby（Load 流程瞬移到 lobby spawn point）；lobby 死亡=原地满血兜底；加载中死亡=原地重生（防重入）。同轮还修了 HUD 血条与快捷栏重合（血条上移到 top=px(-14)）。运行时验证（env EMBERS_AUTO_TEST 门控临时驱动：进 operation→move_item 拾取 1 个 shard 进 hotbar（inv 0→1，地面 items 10→9）→写致命 Damage(9999)→下一帧 inv=0、回 lobby、hp=20.0、items=0）：全部通过，临时代码已清除，main.rs 归零。fmt/clippy/test(34) 通过，待用户手动实测。
 - P4 待完成：合成系统（配方 8×shard→sword / 12×shard→spear / 4×shard→tnt、合成站实体、Crafting overlay）。
 - P5 待完成：初始物资（8×ember_shard 进图携带）+ 数值调参 + 端到端验证。
