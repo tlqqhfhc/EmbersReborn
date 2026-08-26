@@ -1,3 +1,4 @@
+pub mod crafting;
 pub mod dim;
 pub mod gateway_menu;
 pub mod heads_up_display;
@@ -39,6 +40,7 @@ pub enum GameState {
 
 #[derive(States, Debug, Clone, Copy, Eq, PartialEq, Hash, Default)]
 pub enum ActiveOverlay {
+    Crafting,
     GatewayMenu,
     HeadsUpDisplay,
     Inventory,
@@ -62,9 +64,10 @@ fn process_escaping(
     if keys.just_pressed(KeyCode::Escape) {
         match **active_overlay {
             ActiveOverlay::HeadsUpDisplay => next_overlay.set(ActiveOverlay::PauseScreen),
-            ActiveOverlay::GatewayMenu | ActiveOverlay::Inventory | ActiveOverlay::PauseScreen => {
-                next_overlay.set(ActiveOverlay::HeadsUpDisplay)
-            }
+            ActiveOverlay::Crafting
+            | ActiveOverlay::GatewayMenu
+            | ActiveOverlay::Inventory
+            | ActiveOverlay::PauseScreen => next_overlay.set(ActiveOverlay::HeadsUpDisplay),
             ActiveOverlay::OptionsAudio
             | ActiveOverlay::OptionsControls
             | ActiveOverlay::OptionsLanguage
@@ -382,6 +385,7 @@ pub(super) fn plugin(app: &mut App) {
             },
         )
         .add_plugins((
+            crafting::plugin,
             dim::plugin,
             heads_up_display::plugin,
             inventory::plugin,

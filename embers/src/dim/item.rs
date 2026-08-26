@@ -103,7 +103,7 @@ impl Template for ItemStackTemplate {
 
 #[derive(Clone, Component, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(transparent)]
-pub struct StackCount(u8);
+pub struct StackCount(pub u8);
 
 impl Default for StackCount {
     fn default() -> Self {

@@ -9,6 +9,7 @@ use crate::pld::manager::{
 };
 use crate::pld::{Payload, PayloadApp, Tag};
 use crate::ui::RootNode;
+use crate::ui::crafting::OpenCrafting;
 use crate::ui::loading_screen::{DimensionEntryContext, Load};
 use crate::utils::{Keyed, NamespacedKey, SystemRng};
 use actor::Actor;
@@ -205,6 +206,10 @@ fn lobby_scene() -> impl Scene {
                 #Dummy
                 dummy()
                 Transform::from_xyz(5.0, 0.5, 0.0)
+            ),
+            (
+                crafting_station()
+                Transform::from_xyz(-5.0, 0.5, 0.0)
             ),
         ]
     }
@@ -1085,6 +1090,27 @@ pub static INTERACTION_GATEWAY_TO_LOBBY: LazyLock<NamespacedKey> =
 pub static INTERACTION_GATEWAY_TO_OPERATION: LazyLock<NamespacedKey> =
     LazyLock::new(|| NamespacedKey::new_embers("gateway_to_operation"));
 
+pub static INTERACTION_CRAFTING: LazyLock<NamespacedKey> =
+    LazyLock::new(|| NamespacedKey::new_embers("crafting_open"));
+
+/// A small crafting table. Interacting with it opens the crafting overlay.
+/// Note: `Collider::cuboid` takes FULL dimensions (same as the mesh), not half extents.
+fn crafting_station() -> impl Scene {
+    bsn! {
+        #CraftingStation
+        Actor
+        Mesh3d(asset_value(Cuboid::new(2., 1., 1.).mesh().build()))
+        MeshMaterial3d<StandardMaterial>(asset_value(Color::srgb(0.55, 0.42, 0.26)))
+        { PhysicsPreset::Environment.physics(true) }
+        Collider::cuboid(2., 1., 1.)
+        Interactable {
+            distance_factor: 1.,
+            initial_click: { Some(INTERACTION_CRAFTING.clone()) },
+            initial_double_click: None,
+        }
+    }
+}
+
 pub fn gateway(interaction: &NamespacedKey) -> impl Scene {
     bsn! {
         #Gateway
@@ -1152,6 +1178,14 @@ pub(super) fn plugin(app: &mut App) {
                                 DimensionEntryContext::GatewayTravel,
                                 embers::OPERATION.clone(),
                             ));
+                        },
+                        |_environment, _entity, _duration| None,
+                        Duration::from_millis(200),
+                    ),
+                    EntityInteraction::new(
+                        INTERACTION_CRAFTING.clone(),
+                        |environment, _entity| {
+                            environment.commands.trigger(OpenCrafting);
                         },
                         |_environment, _entity, _duration| None,
                         Duration::from_millis(200),
