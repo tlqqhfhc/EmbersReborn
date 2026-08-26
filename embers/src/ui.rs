@@ -20,6 +20,7 @@ use bevy::input_focus::{FocusGained, FocusLost, InputFocus};
 use bevy::math::CompassOctant;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
+use bevy::scene::EntityWorldMutSceneExt;
 use bevy::ui::InteractionDisabled;
 use bevy::ui::auto_directional_navigation::AutoDirectionalNavigator;
 use bevy::window::PrimaryWindow;
@@ -158,24 +159,27 @@ fn text_button<M: 'static>(
              focus: Res<InputFocus>,
              status: Query<(&Hovered, Has<InteractionDisabled>), With<Button>>| {
                 let entity = event.event_target();
-                commands.entity(entity).apply_scene(ui_image_node(
-                    match {
-                        let (Hovered(hovered), disabled) = status
-                            .get(entity)
-                            .expect("Status of the button should be available");
-                        (
-                            *hovered
-                                || focus
-                                    .get()
-                                    .is_some_and(|focus_entity| focus_entity == entity),
-                            disabled,
-                        )
-                    } {
-                        (false, false) => "widgets/button",
-                        (true, false) => "widgets/button_highlighted",
-                        (_highlighted, true) => "widgets/button_disabled",
-                    },
-                ));
+                // Also fires while the button is being despawned (DespawnOnExit on
+                // overlay switch triggers Remove observers), so bail out early if
+                // the button is already gone.
+                let Some((Hovered(hovered), disabled)) = status.get(entity).ok() else {
+                    return;
+                };
+                let highlighted = *hovered
+                    || focus
+                        .get()
+                        .is_some_and(|focus_entity| focus_entity == entity);
+                // The entity may die before this command is applied, so apply the
+                // image defensively instead of panicking on a stale entity.
+                commands.queue(move |world: &mut World| {
+                    if let Some(mut entity) = world.get_entity_mut(entity).ok() {
+                        entity.apply_scene(ui_image_node(match (highlighted, disabled) {
+                            (false, false) => "widgets/button",
+                            (true, false) => "widgets/button_highlighted",
+                            (_highlighted, true) => "widgets/button_disabled",
+                        }));
+                    }
+                });
             },
         )
     }
