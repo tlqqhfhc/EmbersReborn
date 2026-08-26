@@ -1057,6 +1057,10 @@ fn explode(
             )
             .into_iter()
             .filter_map(|entity| living_actors.get(entity).ok())
+            // The exploding creeper is still a living actor with a collider when
+            // this query runs; damaging it would leave a stale message (it despawns
+            // itself in the same frame).
+            .filter(|&(entity, _)| Some(entity) != source.direct_entity)
             .map(|(entity, transform)| {
                 let (direction, distance) =
                     (transform.translation() - source.origin).normalize_and_length();

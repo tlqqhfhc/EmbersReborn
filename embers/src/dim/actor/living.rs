@@ -148,6 +148,11 @@ fn damage(
     active_dimension: Option<Single<&Dimension, With<ActiveDimension>>>,
     active_overlay: Res<State<ActiveOverlay>>,
 ) {
+    // Entities already killed earlier in this pass. Their despawn is still a
+    // pending command, so `get_mut` would still succeed for further messages
+    // targeting them; without this guard the death branch would run twice,
+    // queueing a second despawn (command error panic) and dropping loot twice.
+    let mut dead = Vec::new();
     for Damage {
         target,
         amount,
@@ -178,6 +183,9 @@ fn damage(
             warn!("Could not damage nonexistent living actor {}", target);
             continue;
         };
+        if dead.contains(&entity) {
+            continue;
+        }
         let dealt = damage_taken.value_for(*amount).max(0.);
         health.0 -= dealt;
 
@@ -207,6 +215,7 @@ fn damage(
 
         // Death handling.
         if health.0 <= 0. {
+            dead.push(entity);
             if is_player {
                 // Respawn the player.
                 health.0 = max_health.value();
