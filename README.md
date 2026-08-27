@@ -8,7 +8,7 @@
 
 ## Development
 
-[![Developer QQ](https://img.shields.io/badge/Developer_QQ-974282718-1EBAFC?logo=qq)](tencent://message/?uin=974282718)
+[![Developer QQ](https://img.shields.io/badge/Developer_QQ-974282718-1EBAFC?logo=qq)](tencent://message/?v=3&uin=974282718&site=qq&menu=yes)
 
 Forked from the upstream [Embers](https://github.com/TransparentWhit/Embers) repository by [TransparentWhit](https://github.com/TransparentWhit).
 
