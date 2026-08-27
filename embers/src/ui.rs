@@ -1,4 +1,5 @@
 pub mod crafting;
+pub mod death_screen;
 pub mod dim;
 pub mod gateway_menu;
 pub mod heads_up_display;
@@ -42,6 +43,7 @@ pub enum GameState {
 #[derive(States, Debug, Clone, Copy, Eq, PartialEq, Hash, Default)]
 pub enum ActiveOverlay {
     Crafting,
+    DeathScreen,
     GatewayMenu,
     HeadsUpDisplay,
     Inventory,
@@ -77,7 +79,10 @@ fn process_escaping(
                 GameState::Dimension => next_overlay.set(ActiveOverlay::HeadsUpDisplay),
                 GameState::MainMenu => next_overlay.set(ActiveOverlay::TitleScreen),
             },
+            // Loading and Title screens do not react to Escape.
             ActiveOverlay::LoadingScreen | ActiveOverlay::TitleScreen => {}
+            // The death screen is only left through the Respawn button.
+            ActiveOverlay::DeathScreen => {}
         }
     }
 }
@@ -390,6 +395,7 @@ pub(super) fn plugin(app: &mut App) {
         )
         .add_plugins((
             crafting::plugin,
+            death_screen::plugin,
             dim::plugin,
             heads_up_display::plugin,
             inventory::plugin,

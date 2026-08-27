@@ -5,6 +5,7 @@
 //! movement through the shared [`Movements`] Tnua scheme, attack cooldown, hit-stun
 //! and a death loot table.
 
+use super::Dead;
 use super::player::Player;
 use crate::dim::Movements;
 use crate::utils::NamespacedKey;
@@ -65,7 +66,7 @@ pub struct LootTable(pub Vec<NamespacedKey>);
 /// into [`AiTarget`]; out-of-range targets are cleared.
 pub(super) fn perceive_targets(
     mut mobs: Query<(Entity, &GlobalTransform, &AiPerception, &mut AiTarget), Without<Player>>,
-    players: Query<(Entity, &GlobalTransform), With<Player>>,
+    players: Query<(Entity, &GlobalTransform), (With<Player>, Without<Dead>)>,
 ) {
     for (_mob, mob_transform, perception, mut target) in mobs.iter_mut() {
         target.0 = players

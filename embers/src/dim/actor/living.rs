@@ -12,7 +12,6 @@ use crate::dim::item::item_stack;
 use crate::dim::{ActiveDimension, Dimension, Movements, MovementsConfig, PhysicsPreset};
 use crate::pld::foundry::PayloadTemplate;
 use crate::ui::ActiveOverlay;
-use crate::ui::loading_screen::{DimensionEntryContext, Load};
 use crate::utils::{Keyed, NamespacedKey, SystemRng, template_bundle};
 use ai::{HitStun, LootTable};
 use attributes::{Attributes, AttributesTemplate, DamageTaken, KnockbackTaken, MaxHealth};
@@ -54,6 +53,14 @@ impl MovementConfigTemplate {
 #[derive(Component, Debug)]
 #[require(LivingActor)]
 pub struct Health(pub f32);
+
+/// Marker for a player that has died and is waiting on the death screen.
+/// While present, the player is immune to damage and excluded from mob
+/// perception; healing and the warp back to the lobby only happen when the
+/// player presses Respawn, so late damage messages cannot chip into a
+/// freshly restored health pool.
+#[derive(Component, Debug, Default)]
+pub struct Dead;
 
 impl FromTemplate for Health {
     type Template = HealthTemplate;
@@ -144,9 +151,11 @@ fn damage(
         Option<&SpawnPoint>,
         Option<&mut PlayerInventory>,
         Has<Player>,
+        Option<&Dead>,
     )>,
     active_dimension: Option<Single<&Dimension, With<ActiveDimension>>>,
     active_overlay: Res<State<ActiveOverlay>>,
+    mut next_overlay: ResMut<NextState<ActiveOverlay>>,
 ) {
     // Entities already killed earlier in this pass. Their despawn is still a
     // pending command, so `get_mut` would still succeed for further messages
@@ -178,12 +187,14 @@ fn damage(
             spawn_point,
             inventory,
             is_player,
+            is_dead,
         )) = living_actors.get_mut(*target)
         else {
             warn!("Could not damage nonexistent living actor {}", target);
             continue;
         };
-        if dead.contains(&entity) {
+        // A dead player (waiting on the death screen) is immune to damage.
+        if dead.contains(&entity) || is_dead.is_some() {
             continue;
         }
         let dealt = damage_taken.value_for(*amount).max(0.);
@@ -217,31 +228,38 @@ fn damage(
         if health.0 <= 0. {
             dead.push(entity);
             if is_player {
-                // Respawn the player.
-                health.0 = max_health.value();
+                // Stop the corpse from sliding.
                 controller.action_interrupt(Movements::Knockback(TnuaBuiltinKnockback {
                     shove: Vec3::ZERO,
                     force_forward: None,
                 }));
-                let in_battle = active_dimension
-                    .as_ref()
-                    .is_some_and(|dimension| dimension.key() != &*crate::dim::embers::LOBBY);
-                if in_battle && **active_overlay != ActiveOverlay::LoadingScreen {
-                    // Extraction penalty: everything carried is lost, warp back to the lobby.
-                    // The dimension generation of the warp teleports the player to the lobby spawn point.
-                    if let Some(mut inventory) = inventory {
-                        for slot in 0..inventory.size() {
-                            if let Some(item) = inventory[slot].take() {
-                                commands.entity(item).despawn();
+                if **active_overlay == ActiveOverlay::LoadingScreen {
+                    // Safety fallback (practically unreachable: mobs die with the
+                    // old dimension): respawn in place immediately.
+                    health.0 = max_health.value();
+                    if let Some(spawn_point) = spawn_point {
+                        local_transform.translation = spawn_point.0;
+                    }
+                } else {
+                    // Death screen flow: the player stays dead (hidden, damage-immune,
+                    // excluded from mob perception) until Respawn is pressed. Healing
+                    // and the warp happen on respawn, so late damage cannot chip into
+                    // a freshly restored health pool.
+                    let in_battle = active_dimension
+                        .as_ref()
+                        .is_some_and(|dimension| dimension.key() != &*crate::dim::embers::LOBBY);
+                    if in_battle {
+                        // Extraction penalty: everything carried is lost.
+                        if let Some(mut inventory) = inventory {
+                            for slot in 0..inventory.size() {
+                                if let Some(item) = inventory[slot].take() {
+                                    commands.entity(item).despawn();
+                                }
                             }
                         }
                     }
-                    commands.trigger(Load::EnterDimension(
-                        DimensionEntryContext::PortalTravel,
-                        crate::dim::embers::LOBBY.clone(),
-                    ));
-                } else if let Some(spawn_point) = spawn_point {
-                    local_transform.translation = spawn_point.0;
+                    commands.entity(entity).insert((Dead, Visibility::Hidden));
+                    next_overlay.set(ActiveOverlay::DeathScreen);
                 }
             } else {
                 // Drop loot and despawn.
@@ -259,13 +277,41 @@ fn damage(
     }
 }
 
+/// Revives a player that is respawning: once they have actually landed in the
+/// lobby (immediately for a lobby respawn, after the portal travel otherwise),
+/// restore full health and re-show them. While this has not happened yet the
+/// player is still dead, so no mob can hit them during the warp.
+fn finalize_respawn(
+    mut commands: Commands,
+    mut players: Query<(Entity, &mut Health, &Attributes<MaxHealth>), (With<Player>, With<Dead>)>,
+    active_dimension: Option<Single<&Dimension, With<ActiveDimension>>>,
+    overlay: Res<State<ActiveOverlay>>,
+) {
+    for (entity, mut health, max_health) in &mut players {
+        if **overlay == ActiveOverlay::LoadingScreen {
+            continue;
+        }
+        if active_dimension
+            .as_ref()
+            .is_some_and(|dimension| dimension.key() == &*crate::dim::embers::LOBBY)
+        {
+            health.0 = max_health.value();
+            commands
+                .entity(entity)
+                .remove::<Dead>()
+                .remove::<Visibility>()
+                .remove::<ai::HitStun>();
+        }
+    }
+}
+
 pub(super) fn plugin(app: &mut App) {
     app.add_message::<Damage>()
         .add_message::<DamageNumber>()
         .init_resource::<SystemRng<SmallRng>>()
         .add_systems(
             Update,
-            (damage, creeper::system, zombie::system)
+            (damage, creeper::system, zombie::system, finalize_respawn)
                 .run_if(in_state(crate::ui::GameState::Dimension)),
         )
         .add_plugins(ai::plugin)
