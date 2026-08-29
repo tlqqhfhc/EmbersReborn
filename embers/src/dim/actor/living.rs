@@ -296,10 +296,14 @@ fn finalize_respawn(
             .is_some_and(|dimension| dimension.key() == &*crate::dim::embers::LOBBY)
         {
             health.0 = max_health.value();
+            // Re-insert (do NOT just remove) Visibility: bevy only propagates
+            // InheritedVisibility for entities that still have a Visibility
+            // component, so removing it would leave the player permanently
+            // hidden after the corpse's Hidden state.
             commands
                 .entity(entity)
                 .remove::<Dead>()
-                .remove::<Visibility>()
+                .insert(Visibility::Visible)
                 .remove::<ai::HitStun>();
         }
     }
