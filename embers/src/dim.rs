@@ -3,6 +3,7 @@ pub mod block;
 mod chunk;
 pub mod item;
 
+use crate::balance;
 use crate::input::InteractionTrigger;
 use crate::pld::manager::{
     PayloadManager, inject_keyed_embers_payload_batch, resolve_handle, resolve_payload,
@@ -38,7 +39,7 @@ use derive_where::derive_where;
 use embers_macros::identify;
 use item::embers::{EMBER_SHARD, SPEAR, SWORD};
 use item::inv::{ItemDestination, ItemMoveQuantity, ItemSource, MoveItemCommandExt};
-use item::item_stack;
+use item::{StackCount, item_stack};
 use rand::RngExt;
 use rand::rngs::SmallRng;
 use serde::{Deserialize, Serialize};
@@ -215,23 +216,8 @@ fn lobby_scene() -> impl Scene {
     }
 }
 
-/// Number of creepers spawned per operation dimension generation.
-const CREEPER_SPAWN_COUNT: usize = 3;
-/// Number of zombies spawned per operation dimension generation.
-const ZOMBIE_SPAWN_COUNT: usize = 5;
-/// Number of scattered ember shard item actors per operation generation.
-const SCATTERED_SHARD_COUNT: usize = 8;
-/// Number of scattered weapon item actors per operation generation.
-const SCATTERED_WEAPON_COUNT: usize = 2;
-/// Spawn positions stay at least this far from the dimension entry point.
-const ENTRY_CLEAR_RADIUS: f32 = 6.;
-/// Mobs and items spawn within `±OPERATION_SPAWN_BOUND` of the origin.
-const OPERATION_SPAWN_BOUND: f32 = 16.;
-/// Seconds after entering the operation until the extraction portal appears.
-const OPERATION_PORTAL_DELAY_SECS: f32 = 90.;
-/// Where the extraction portal appears once its timer is up.
-const OPERATION_PORTAL_SPAWN: Vec3 = Vec3::new(0., 0.5, 0.);
-/// (center, size) of the fixed cuboid obstacles in the operation arena.
+/// (center, size) of the fixed cuboid obstacles in the operation arena
+/// (layout, not balance — gameplay numbers live in `crate::balance`).
 const OPERATION_OBSTACLES: [(Vec3, Vec3); 7] = [
     (Vec3::new(-9., 0.75, -6.), Vec3::new(2.5, 1.5, 2.5)),
     (Vec3::new(9., 0.75, -6.), Vec3::new(2.5, 1.5, 2.5)),
@@ -259,7 +245,7 @@ fn operation_scene() -> impl Scene {
         ActiveDimension
         Transform
         Visibility
-        PortalTimer({Timer::from_seconds(OPERATION_PORTAL_DELAY_SECS, TimerMode::Once)})
+        PortalTimer({Timer::from_seconds(balance::PORTAL_DELAY_SECS, TimerMode::Once)})
         Children [
             (
                 dimension_lighting()
@@ -310,7 +296,7 @@ fn tick_portal_timers(
         if portal_timer.0.just_finished() {
             let mut portal = commands.spawn_scene(bsn! {
                 gateway(&INTERACTION_GATEWAY_TO_LOBBY)
-                template_value(Transform::from_translation(OPERATION_PORTAL_SPAWN))
+                template_value(Transform::from_translation(balance::PORTAL_SPAWN))
             });
             portal.insert(ChildOf(entity));
         }
@@ -322,36 +308,36 @@ fn random_operation_position(rng: &mut SystemRng<SmallRng>) -> Vec3 {
     const ENTRY: Vec3 = Vec3::new(0., 1., 18.);
     for _ in 0..16 {
         let position = Vec3::new(
-            rng.random_range(-OPERATION_SPAWN_BOUND..=OPERATION_SPAWN_BOUND),
+            rng.random_range(-balance::SPAWN_BOUND..=balance::SPAWN_BOUND),
             1.,
-            rng.random_range(-OPERATION_SPAWN_BOUND..=OPERATION_SPAWN_BOUND),
+            rng.random_range(-balance::SPAWN_BOUND..=balance::SPAWN_BOUND),
         );
-        if position.distance(ENTRY) > ENTRY_CLEAR_RADIUS {
+        if position.distance(ENTRY) > balance::ENTRY_CLEAR_RADIUS {
             return position;
         }
     }
-    Vec3::new(0., 1., -OPERATION_SPAWN_BOUND)
+    Vec3::new(0., 1., -balance::SPAWN_BOUND)
 }
 
 /// Spawns the operation's mobs and scattered item loot. Called when the
 /// operation dimension is generated.
 fn spawn_operation_content(commands: &mut Commands, rng: &mut SystemRng<SmallRng>) {
-    for _ in 0..CREEPER_SPAWN_COUNT {
+    for _ in 0..balance::CREEPER_SPAWN_COUNT {
         commands.spawn_scene(bsn! {
             creeper()
             template_value(Transform::from_translation(random_operation_position(rng)))
         });
     }
-    for _ in 0..ZOMBIE_SPAWN_COUNT {
+    for _ in 0..balance::ZOMBIE_SPAWN_COUNT {
         commands.spawn_scene(bsn! {
             zombie(ZombieWeapon::roll(rng))
             template_value(Transform::from_translation(random_operation_position(rng)))
         });
     }
-    let scattered_items: Vec<NamespacedKey> = (0..SCATTERED_SHARD_COUNT)
+    let scattered_items: Vec<NamespacedKey> = (0..balance::SCATTERED_SHARD_COUNT)
         .map(|_| EMBER_SHARD.clone())
         .chain(
-            (0..SCATTERED_WEAPON_COUNT).map(|_| match rng.random_range(0..2) {
+            (0..balance::SCATTERED_WEAPON_COUNT).map(|_| match rng.random_range(0..2) {
                 0 => SWORD.clone(),
                 _ => SPEAR.clone(),
             }),
@@ -418,7 +404,30 @@ fn handle_dimension_generation_request(
     } else {
         let mut player_entity = commands.spawn_scene(player_scene(spawn_point));
         player_entity.insert(ChildOf(*root_node));
+        let player_id = player_entity.id();
+        // A brand-new player starting in the lobby (the title-screen Init
+        // flow) gets the initial shard stash. Every other lobby entry
+        // (gateway / portal travel) teleports the existing player instead
+        // and grants nothing.
+        if *key == *embers::LOBBY {
+            grant_initial_stash(&mut commands, player_id);
+        }
     }
+}
+
+/// Puts the initial `balance::INITIAL_EMBER_SHARDS` stack into the new
+/// player's first inventory slot.
+fn grant_initial_stash(commands: &mut Commands, player: Entity) {
+    let shard = commands
+        .spawn_scene(item_stack(EMBER_SHARD.clone()))
+        .insert(StackCount(balance::INITIAL_EMBER_SHARDS))
+        .id();
+    commands.entity(shard).insert(ChildOf(player));
+    commands.queue(move |world: &mut World| {
+        if let Some(mut inventory) = world.get_mut::<PlayerInventory>(player) {
+            inventory[0] = Some(shard);
+        }
+    });
 }
 
 #[derive(Deserialize, Serialize, Copy, Clone, Debug, Eq, Hash, PartialEq)]

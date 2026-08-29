@@ -5,6 +5,7 @@ use super::ai::{AiPerception, AiTarget, AttackCooldown, HitStun, LootTable, chas
 use super::attributes::MovementSpeed;
 use super::living_actor;
 use super::{Attributes, Damage, DamageKnockback, DamageSource};
+use crate::balance;
 use crate::dim::Movements;
 use crate::dim::item::MeleeStrike;
 use crate::dim::item::embers::EMBER_SHARD;
@@ -42,11 +43,13 @@ pub enum ZombieWeapon {
 }
 
 impl ZombieWeapon {
-    /// Rolls the spawn weapon with a 4/3/3 sword/spear/bare-hand ratio.
+    /// Rolls the spawn weapon using the `balance::ZOMBIE_WEAPON_RATIO`
+    /// sword/spear/bare-hand weights.
     pub fn roll(rng: &mut impl RngExt) -> Self {
-        match rng.random_range(0..10) {
-            0..=3 => Self::Sword,
-            4..=6 => Self::Spear,
+        let (sword, spear, bare) = balance::ZOMBIE_WEAPON_RATIO;
+        match rng.random_range(0..sword + spear + bare) {
+            roll if roll < sword => Self::Sword,
+            roll if roll < sword + spear => Self::Spear,
             _ => Self::BareHand,
         }
     }
@@ -94,7 +97,7 @@ pub fn zombie(weapon: ZombieWeapon) -> impl Scene {
             sight_range: 24.,
             attack_range: 2.,
         }
-        LootTable({vec![EMBER_SHARD.clone(), EMBER_SHARD.clone()]})
+        LootTable({vec![EMBER_SHARD.clone(); balance::ZOMBIE_LOOT_SHARD_COUNT]})
     }
 }
 

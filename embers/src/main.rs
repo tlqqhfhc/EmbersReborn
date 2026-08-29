@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+pub mod balance;
 pub mod dim;
 pub mod input;
 pub mod pld;
